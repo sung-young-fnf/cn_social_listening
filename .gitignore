@@ -1,0 +1,26 @@
+# 환경 변수
+.env
+
+# 크롤링 결과 (용량 큼)
+output/
+
+# Node.js
+node_modules/
+package-lock.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 생성 결과물 (스크립트로 재생성 가능)
+*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

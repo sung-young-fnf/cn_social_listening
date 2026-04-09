@@ -1,0 +1,16 @@
+{
+  "name": "douyin-downloader",
+  "version": "1.0.0",
+  "description": "더우인(抖音) 영상 다운로드 및 계정 메타데이터 수집 도구",
+  "type": "module",
+  "scripts": {
+    "download": "node tests/test-douyin-download-v3.js",
+    "metadata": "node tests/test-douyin.js"
+  },
+  "dependencies": {
+    "@hyperbrowser/sdk": "^0.48.1",
+    "dotenv": "^16.4.7",
+    "pptxgenjs": "^4.0.1",
+    "puppeteer-core": "^24.37.2"
+  }
+}
