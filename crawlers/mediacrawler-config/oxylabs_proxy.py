@@ -57,9 +57,21 @@ class OxylabsProxy(ProxyProvider):
 
 
 def new_oxylabs_proxy() -> OxylabsProxy:
+    """sticky session 강제: sessid 미설정 시 매 connection마다 IP 로테이션 →
+    cookie 발급 IP ≠ 사용 IP → WAF 461. 항상 sessid + sesstime 박아둠.
+    """
+    import secrets
+    base_user = os.getenv("OXYLABS_USERNAME", "customer-prcs_data1_LpjIC-cc-cn")
+    sessid = os.getenv("OXYLABS_SESSID") or secrets.token_hex(8)
+    sesstime = os.getenv("OXYLABS_SESSTIME", "30")  # 분 단위, residential 최대 30
+    username = f"{base_user}-sessid-{sessid}-sesstime-{sesstime}"
+    print(
+        f"[OxylabsProxy] sessid={sessid} sesstime={sesstime}m  "
+        f"(영구화하려면 export OXYLABS_SESSID={sessid})"
+    )
     return OxylabsProxy(
         host=os.getenv("OXYLABS_HOST", "pr.oxylabs.io"),
         port=int(os.getenv("OXYLABS_PORT", "7777")),
-        username=os.getenv("OXYLABS_USERNAME", "customer-prcs_data1_LpjIC-cc-cn"),
+        username=username,
         password=os.getenv("OXYLABS_PASSWORD", "Prcsdata_1234"),
     )

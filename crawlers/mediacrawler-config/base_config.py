@@ -20,8 +20,8 @@
 # Basic configuration
 PLATFORM = "xhs"  # Platform, xhs | dy | ks | bili | wb | tieba | zhihu
 KEYWORDS = "编程副业,编程兼职"  # Keyword search configuration, separated by English commas
-LOGIN_TYPE = "cookie"  # qrcode or phone or cookie
-COOKIES = "abRequestId=a92760fc-7bc7-5c0e-8335-2781c7ecb557; webBuild=6.1.2; xsecappid=xhs-pc-web; loadts=1774338188551; a1=19d1ecc250buftnfwha4bx8rk0uzozdy558v38dvd50000113143; webId=cc1ea862aba77a812cbd3d6178f3a56c; websectiga=59d3ef1e60c4aa37a7df3c23467bd46d7f1da0b1918cf335ee7f2e9e52ac04cf; sec_poison_id=a9b8e12e-de0a-4ba7-8b16-1390df6386cf; gid=yjfydSSqyS2JyjfydSSJ22Yf8D7i9IiEx04DYhfCYFT87h28ulufvq888yyqy4q88jW2Sf2J; unread={%22ub%22:%2269b2345d000000001b01f53c%22%2C%22ue%22:%2269c100f8000000001d01a0e0%22%2C%22uc%22:28}"
+LOGIN_TYPE = "qrcode"  # qrcode or phone or cookie  (TEST: sessid 박힌 fresh IP에서 새 QR — cookie matching 보장)
+COOKIES = "acw_tc=0a00d62f17782131438816595e30c57308f205e4fca1afbca2b96527853080; abRequestId=cd0da71d-b0e1-503e-a1f1-2657059f1a35; xsecappid=xhs-pc-web; a1=19e05c3580a4v7xpgmq82artsai9myz2k8wxwz4jq50000159959; webId=ce82c93816ac941773c1144d30b06881; acw_tc=0a4a38b717782131519001756e755e7021e0af0f034793371b0139eb995828; web_session=030037aece355563bd756d27852e4aae72f33c; websectiga=634d3ad75ffb42a2ade2c5e1705a73c845837578aeb31ba0e442d75c648da36a; sec_poison_id=4cbb2c27-968c-491d-9589-bf01619d9149; ets=1778213466091; webBuild=6.8.2; loadts=1778213665858"
 CRAWLER_TYPE = (
     "creator"  # Crawling type, search (keyword search) | detail (post details) | creator (creator homepage data)
 )
@@ -93,11 +93,11 @@ USER_DATA_DIR = "%s_user_data_dir"  # %s will be replaced by platform name
 START_PAGE = 1
 
 # Control the number of crawled videos/posts
-CRAWLER_MAX_NOTES_COUNT = 100  # High limit; date filter will stop early
+CRAWLER_MAX_NOTES_COUNT = 5  # TEST: 100 → 5 (5게시물 검증용, 나중에 복원)
 
 # Date filter for creator notes (KST, inclusive). Leave empty to disable.
-CRAWLER_DATE_START = "2026-03-16"  # yyyy-mm-dd
-CRAWLER_DATE_END = "2026-03-22"    # yyyy-mm-dd
+CRAWLER_DATE_START = ""  # TEST: 비움 (실제 코드 미사용. 원래 "2026-03-16")
+CRAWLER_DATE_END = ""    # TEST: 비움 (원래 "2026-03-22")
 
 # Controlling the number of concurrent crawlers
 MAX_CONCURRENCY_NUM = 1
