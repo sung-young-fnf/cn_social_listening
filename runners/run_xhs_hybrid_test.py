@@ -286,6 +286,52 @@ def get_cookie_string_from_context(context) -> str:
     return "; ".join(f"{c['name']}={c['value']}" for c in cookies)
 
 
+# ============ Cookie 저장/공유 ============
+COOKIE_SHARE_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "output"))
+COOKIE_TXT_PATH = os.path.join(COOKIE_SHARE_DIR, "xhs_cookie.txt")
+COOKIE_JSON_PATH = os.path.join(COOKIE_SHARE_DIR, "xhs_session.json")
+
+
+def save_cookies_for_reuse(context, source_note: str = "hybrid_test"):
+    """영속 세션의 cookie를 파일로 저장 (cookie_test.py 등에서 재사용).
+
+    저장 파일:
+      output/xhs_cookie.txt   — cookie 문자열 (그대로 붙여넣기 가능)
+      output/xhs_session.json — cookie + 메타데이터 (발급 시각 등)
+    """
+    import json
+    os.makedirs(COOKIE_SHARE_DIR, exist_ok=True)
+
+    cookies_list = context.cookies()
+    cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies_list)
+
+    # 1) 단순 텍스트 (재사용 빠름)
+    with open(COOKIE_TXT_PATH, "w", encoding="utf-8") as f:
+        f.write(cookie_str)
+
+    # 2) JSON 메타데이터 (감사 / 만료 추적)
+    meta = {
+        "source": source_note,
+        "saved_at": datetime.now().isoformat(),
+        "ip_hint": "Oxylabs CN (발급 IP — 재사용 시도 같은 풀로)",
+        "cookie_count": len(cookies_list),
+        "has_a1": any(c["name"] == "a1" for c in cookies_list),
+        "has_web_session": any(c["name"] == "web_session" for c in cookies_list),
+        "cookies": [
+            {"name": c["name"], "value": c["value"], "domain": c.get("domain", ""),
+             "path": c.get("path", ""), "expires": c.get("expires", -1)}
+            for c in cookies_list
+        ],
+    }
+    with open(COOKIE_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    print(f"\n[Cookie] 영속 세션 → 파일 저장 완료")
+    print(f"         {COOKIE_TXT_PATH}")
+    print(f"         {COOKIE_JSON_PATH}")
+    print(f"         cookie_test.py에서 자동으로 이 파일 사용 가능")
+
+
 def make_sign_function(page):
     """page 위에서 _webmsxyw 호출 — 영속 세션이라 a1/web_session 정합성 자동.
 
@@ -346,6 +392,9 @@ def main():
             print("[ERROR] web_session 없음 — 로그인 실패 추정")
             sys.exit(1)
         print(f"         keys: {list(cookie_dict.keys())}")
+
+        # 재사용 위해 파일로 저장 (cookie_test.py 등에서 활용)
+        save_cookies_for_reuse(context, source_note="hybrid_test")
 
         # XhsClient 셋업
         sign_func = make_sign_function(page)
