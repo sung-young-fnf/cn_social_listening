@@ -1,0 +1,331 @@
+{
+  "source": "MediaCrawler",
+  "saved_at": "2026-05-08T16:04:46.017095",
+  "login_type": "qrcode",
+  "cookie_count": 32,
+  "has_a1": true,
+  "has_web_session": true,
+  "has_gid": true,
+  "cookies": [
+    {
+      "name": "acw_tc",
+      "value": "0a00d80e17782230158997626ec8587669387e0f67579d41893afc744bb924",
+      "domain": "www.xiaohongshu.com",
+      "path": "/",
+      "expires": 1778224816.256866,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "abRequestId",
+      "value": "0063cc4e-4af8-5257-af1c-3a5fd963e213",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1809759015.257138,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "xsecappid",
+      "value": "xhs-pc-web",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1809759852,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "a1",
+      "value": "19e0659f55cqo7g3hvmz864fe3oz00oou0phtaihi30000346647",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1809759019,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "webId",
+      "value": "ebb30adb5e946655f6c2eaa85cadcee2",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1809759019,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "acw_tc",
+      "value": "0a0bb13517782230234136669ef924df8f304f4e45b58533aba49d5dfaddd0",
+      "domain": "edith.xiaohongshu.com",
+      "path": "/",
+      "expires": 1778224823.55634,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "web_session",
+      "value": "030037aeced3db6c4173fcc1852e4a5f1a8397",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1809759024.191248,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "acw_tc",
+      "value": "0ad622c517782230279923571e3867f9dc71838271bc3714b1e1dc138fddb7",
+      "domain": "so.xiaohongshu.com",
+      "path": "/",
+      "expires": 1778224828.114062,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "gid",
+      "value": "yjd8K20yDD7Syjd8K2ji28032SAlWkqxh6uYUx3K4idqlxq8u88ll9888q4KK4W8S8q4dyjD",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1812783867.759521,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "acw_tc",
+      "value": "0a587c9b17782230432772957edbde77bbe6503a379be70c8fc2328e3abfc6",
+      "domain": "www.rednote.com",
+      "path": "/",
+      "expires": 1778224843.470928,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "acw_tc",
+      "value": "0a587c9817782230459924980efab4956adafdcbcdd7b865685c72c709c74e",
+      "domain": "as.rednote.com",
+      "path": "/",
+      "expires": 1778224846.178114,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ets",
+      "value": "1778223046932",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1780815046.924165,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "xsecappid",
+      "value": "xhs-pc-web",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1809759876,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "abRequestId",
+      "value": "9fdba2ca37c2cb3aedcbd5f0aad9d382",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1809759050,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "acw_tc",
+      "value": "0a587ca017782230515053283edf520b0c6a2629d3ecb49438088792987502",
+      "domain": "webapi.rednote.com",
+      "path": "/",
+      "expires": 1778224851.700233,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "x-rednote-datactry",
+      "value": "SG",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1809759880.688809,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "gid",
+      "value": "yjd8K20YiY3jyjd8K20KyuJIjWS60kqK2MkVh1UWYl4M3Yq8kkTVhf888y2qYWY8D8KKfiK8",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1812783060.643261,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "webBuild",
+      "value": "6.8.2",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "loadts",
+      "value": "1778223852521",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1809759852,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "websectiga",
+      "value": "29098a4cf41f76ee3f8db19051aaa60c0fc7c5e305572fec762da32d457d76ae",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1778483054,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sec_poison_id",
+      "value": "1e832c36-77b0-487a-ad99-459a32e57260",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1778224459,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "unread",
+      "value": "{%22ub%22:%2269ed8e6100000000220242c6%22%2C%22ue%22:%2269eb488e000000001b022ee4%22%2C%22uc%22:23}",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ets",
+      "value": "1778223864151",
+      "domain": ".xiaohongshu.com",
+      "path": "/",
+      "expires": 1780815864.152704,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "webBuild",
+      "value": "6.7.0",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "loadts",
+      "value": "1778223876420",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1809759876,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "a1",
+      "value": "19e066709594ieo3xrv9i2fqgov8757hgookx1ikv30000842917",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1809759876,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "webId",
+      "value": "ebb30adb5e946655f6c2eaa85cadcee2",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "websectiga",
+      "value": "29098a4cf41f76ee3f8db19051aaa60c0fc7c5e305572fec762da32d457d76ae",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1778483079,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sec_poison_id",
+      "value": "40c42899-7d2a-48f6-b652-40460aee1435",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1778224484,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "web_session",
+      "value": "040069b88f94de651c5661c3c83b4b3b40eb18",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1809759880.688683,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "id_token",
+      "value": "VjEAAIrrAXjPC8g1KB3vDIj2dWAyg/z3sBNUHKwOh1RSeMC9SqxCRC8yVysoP6jCr0BZf6S3zDpsjOnQ0ZYeFfE/DD+YqMJbGarg1msYWIgM5C9HVxI0S3YMT11aGLXhhjGucbyL",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1809759880.688779,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "x-rednote-holderctry",
+      "value": "KR",
+      "domain": ".rednote.com",
+      "path": "/",
+      "expires": 1809759880.688832,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    }
+  ]
+}
