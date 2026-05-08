@@ -2,7 +2,6 @@
 .env
 
 # 크롤링 결과 (용량 큼)
-output/
 
 # Node.js
 node_modules/
