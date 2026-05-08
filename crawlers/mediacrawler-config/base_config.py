@@ -47,11 +47,20 @@ SAVE_LOGIN_STATE = True
 # Whether to enable CDP mode - use the user's existing Chrome/Edge browser to crawl, providing better anti-detection capabilities
 # Once enabled, the user's Chrome/Edge browser will be automatically detected and started, and controlled through the CDP protocol.
 # This method uses the real browser environment, including the user's extensions, cookies and settings, greatly reducing the risk of detection.
-ENABLE_CDP_MODE = True
+#
+# ⚠️ 주의: CDP 모드는 Playwright의 proxy 설정이 적용되지 않음 (cdp_browser.py:376 경고).
+#         결과적으로 브라우저 트래픽이 사용자 PC IP로 직접 나감 → IP 차단 위험.
+#         Oxylabs 프록시를 모든 트래픽에 적용하려면 False 권장 (표준 Playwright 모드).
+ENABLE_CDP_MODE = False
 
 # CDP debug port, used to communicate with the browser
 # If the port is occupied, the system will automatically try the next available port
 CDP_DEBUG_PORT = 9222
+
+# 이미 실행 중인 브라우저(--remote-debugging-port가 켜진)에 attach 할지 여부.
+# False = MediaCrawler가 직접 새 Chrome 인스턴스를 띄움 (우리는 이거)
+# True = 사용자가 미리 chrome --remote-debugging-port=9222 로 띄워둔 인스턴스에 attach
+CDP_CONNECT_EXISTING = False
 
 # Custom browser path (optional)
 # If it is empty, the system will automatically detect the installation path of Chrome/Edge
@@ -122,8 +131,10 @@ STOP_WORDS_FILE = "./docs/hit_stopwords.txt"
 # Chinese font file path
 FONT_PATH = "./docs/STZHONGS.TTF"
 
-# Crawl interval
-CRAWLER_MAX_SLEEP_SEC = 2
+# Crawl interval (요청 사이 sleep, 초)
+# 2초는 봇으로 즉시 식별. 12~20초로 인간 패턴에 가깝게.
+# 차단 회복 후 작은 규모(1~5명) 검증할 땐 더 크게 잡는 것 권장.
+CRAWLER_MAX_SLEEP_SEC = 15
 
 from .bilibili_config import *
 from .xhs_config import *

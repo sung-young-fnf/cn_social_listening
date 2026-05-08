@@ -20,6 +20,9 @@
 
 # Xiaohongshu platform configuration
 
+# 국제판(rednote.com) 사용 여부. False = 중국 본토 xiaohongshu.com (우리는 이거)
+XHS_INTERNATIONAL = False
+
 # Sorting method, the specific enumeration value is in media_platform/xhs/field.py
 SORT_TYPE = "popularity_descending"
 
