@@ -83,6 +83,8 @@ def parse_args():
                    help="user_data_dir 삭제하고 QR 새로 로그인")
     p.add_argument("--login-timeout", type=int, default=180,
                    help="QR 스캔 대기 시간 (초)")
+    p.add_argument("--probe", action="store_true",
+                   help="X 아키텍처 진단 — _webmsxyw 반환 + fetch 시도, 결과 출력 후 종료")
     return p.parse_args()
 
 
@@ -163,37 +165,83 @@ def build_post_row(note: Dict, profile_id: str, timestamp_str: str) -> Dict:
 
 # ============ 영속 브라우저 + 로그인 ============
 
+# UI 셀렉터 (보조) — 로그인 후 "我" 탭. UI 변경에 약하므로 cookie 검사를 1차로 사용.
 LOGGED_IN_SELECTOR = "xpath=//a[contains(@href, '/user/profile/')]//span[text()='我']"
 
 
-def is_logged_in(page) -> bool:
-    """프로필 '我' 버튼 보이면 로그인됨"""
+def has_web_session(context) -> bool:
+    """context cookie 중 web_session 있으면 로그인 완료로 간주."""
+    try:
+        for c in context.cookies():
+            if c.get("name") == "web_session" and c.get("value"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def is_logged_in(page, context=None) -> bool:
+    """1차: web_session 쿠키, 2차: '我' UI 셀렉터 fallback."""
+    if context is not None and has_web_session(context):
+        return True
     try:
         return page.is_visible(LOGGED_IN_SELECTOR, timeout=2000)
     except Exception:
         return False
 
 
-def wait_for_qr_login(page, timeout_seconds: int) -> bool:
-    """QR 스캔 후 로그인 완료까지 폴링"""
+def _save_diag(page, label: str):
+    """타임아웃 시 진단용 스크린샷 + URL/HTML 저장."""
+    try:
+        diag_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "output"))
+        os.makedirs(diag_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        png = os.path.join(diag_dir, f"diag_{label}_{ts}.png")
+        html = os.path.join(diag_dir, f"diag_{label}_{ts}.html")
+        page.screenshot(path=png, full_page=True)
+        with open(html, "w", encoding="utf-8") as f:
+            f.write(page.content())
+        print(f"      [diag] URL          : {page.url}")
+        print(f"      [diag] screenshot   : {png}")
+        print(f"      [diag] html dump    : {html}")
+    except Exception as e:
+        print(f"      [diag] 진단 저장 실패: {e}")
+
+
+def wait_for_qr_login(page, context, timeout_seconds: int) -> bool:
+    """QR 스캔 후 로그인 완료까지 폴링 (cookie 기반)."""
     print(f"\n    ★ 폰의 샤오홍슈 앱(小红书)으로 화면의 QR을 스캔해주세요.")
     print(f"      최대 {timeout_seconds}초 대기. 창 닫지 마세요.\n")
 
     start = time.time()
     last_print_at = 0
     while time.time() - start < timeout_seconds:
+        if has_web_session(context):
+            return True
         try:
-            if page.is_visible(LOGGED_IN_SELECTOR, timeout=500):
+            if page.is_visible(LOGGED_IN_SELECTOR, timeout=300):
                 return True
         except Exception:
             pass
 
         elapsed = int(time.time() - start)
-        if elapsed - last_print_at >= 30:
+        if elapsed - last_print_at >= 20:
             remaining = timeout_seconds - elapsed
-            print(f"      ⏳ 대기 중... 남은 {remaining}초")
+            try:
+                cur_url = page.url
+            except Exception:
+                cur_url = "?"
+            cookie_count = 0
+            try:
+                cookie_count = len(context.cookies())
+            except Exception:
+                pass
+            print(f"      ⏳ 대기 중... 남은 {remaining}초 "
+                  f"(url={cur_url} cookies={cookie_count})")
             last_print_at = elapsed
         time.sleep(1)
+    # 타임아웃 → 진단 저장
+    _save_diag(page, "qr_timeout")
     return False
 
 
@@ -260,14 +308,15 @@ def setup_persistent_browser(use_proxy: bool, reset: bool, login_timeout: int):
         sys.exit(1)
     time.sleep(3)
 
-    # 로그인 상태 분기
-    if is_logged_in(page):
+    # 로그인 상태 분기 — cookie 기반이 1차
+    if is_logged_in(page, context):
         print(f"[Login] ✅ 이미 로그인됨 (영속 세션 활용)")
     else:
         print(f"[Login] 로그인 안 됨 → QR 스캔 필요")
-        ok = wait_for_qr_login(page, timeout_seconds=login_timeout)
+        ok = wait_for_qr_login(page, context, timeout_seconds=login_timeout)
         if not ok:
             print(f"[ERROR] QR 로그인 시간 초과 (또는 실패)")
+            print(f"        스크린샷/HTML로 화면 상태 확인 → output/diag_qr_timeout_*.png")
             try:
                 context.close()
                 pw.stop()
@@ -330,6 +379,374 @@ def save_cookies_for_reuse(context, source_note: str = "hybrid_test"):
     print(f"         {COOKIE_TXT_PATH}")
     print(f"         {COOKIE_JSON_PATH}")
     print(f"         cookie_test.py에서 자동으로 이 파일 사용 가능")
+
+
+# ============ Probe (X 아키텍처 진단) ============
+def run_probe(page, user_id: str):
+    """page 안에서 _webmsxyw 반환 형태 + fetch 응답 확인.
+
+    출력 보고 X-b(헤더 수동) / X-c(네비게이션) 결정.
+    """
+    print(f"\n{'='*60}")
+    print(f"  X 아키텍처 PROBE")
+    print(f"{'='*60}")
+
+    sample_uri = (
+        f"/api/sns/web/v1/user_posted?num=30&cursor=&user_id={user_id}"
+        f"&image_scenes=FD_WM_WEBP"
+    )
+    api_url = f"https://edith.xiaohongshu.com{sample_uri}"
+
+    # ----- 1) _webmsxyw 반환 키/값 확인 -----
+    print(f"\n[1] _webmsxyw 반환 키")
+    sign_info = page.evaluate(
+        """([uri, data]) => {
+            try {
+                const r = window._webmsxyw(uri, data);
+                return {
+                    ok: true,
+                    type: typeof r,
+                    keys: r && typeof r === 'object' ? Object.keys(r) : null,
+                    value: r,
+                    has_x_s_common: !!(r && (r['X-s-common'] || r['x-s-common'])),
+                    a1_local: localStorage.getItem('a1'),
+                    a1_doc_cookie: (document.cookie.match(/(?:^|; )a1=([^;]*)/) || [])[1] || null,
+                };
+            } catch (e) {
+                return { ok: false, error: String(e) };
+            }
+        }""",
+        [sample_uri, None],
+    )
+    print(f"    ok            : {sign_info.get('ok')}")
+    print(f"    type          : {sign_info.get('type')}")
+    print(f"    keys          : {sign_info.get('keys')}")
+    print(f"    has_x_s_common: {sign_info.get('has_x_s_common')}")
+    print(f"    value (sample): {str(sign_info.get('value'))[:300]}")
+    print(f"    a1 localStor  : {sign_info.get('a1_local')}")
+    print(f"    a1 cookie     : {sign_info.get('a1_doc_cookie')}")
+
+    if not sign_info.get("ok"):
+        print(f"\n[ERROR] _webmsxyw 호출 실패: {sign_info.get('error')}")
+        return
+
+    sign_value = sign_info.get("value") or {}
+
+    # ----- 2) 헤더 매핑 — 키 케이스 lower로 통일 -----
+    headers_manual = {}
+    for k, v in sign_value.items():
+        headers_manual[k.lower()] = str(v)
+    print(f"\n[2] fetch에 박을 헤더 (lowercase 변환)")
+    print(f"    keys: {list(headers_manual.keys())}")
+
+    # ----- 3) 전략 A: 헤더 수동 부착 + fetch -----
+    print(f"\n[3] 전략 A — 수동 헤더 + fetch (X-b 후보)")
+    res_a = page.evaluate(
+        """async ([url, headers]) => {
+            try {
+                const r = await fetch(url, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers,
+                });
+                const text = await r.text();
+                let body = text;
+                try { body = JSON.parse(text); } catch {}
+                return {
+                    status: r.status,
+                    ok: r.ok,
+                    body_preview: typeof body === 'string'
+                        ? body.slice(0, 500)
+                        : JSON.stringify(body).slice(0, 500),
+                    code: typeof body === 'object' ? body.code : null,
+                    msg: typeof body === 'object' ? body.msg : null,
+                    note_count: typeof body === 'object'
+                        && body.data && body.data.notes
+                        ? body.data.notes.length : null,
+                };
+            } catch (e) {
+                return { error: String(e) };
+            }
+        }""",
+        [api_url, headers_manual],
+    )
+    print(f"    status     : {res_a.get('status')}")
+    print(f"    code/msg   : {res_a.get('code')} / {res_a.get('msg')}")
+    print(f"    note_count : {res_a.get('note_count')}")
+    print(f"    body       : {res_a.get('body_preview')}")
+
+    # ----- 4) 전략 B: 헤더 없이 fetch (브라우저 인터셉터에 맡김) -----
+    print(f"\n[4] 전략 B — 헤더 없이 fetch (X-a 후보, 인터셉터 의존)")
+    res_b = page.evaluate(
+        """async ([url]) => {
+            try {
+                const r = await fetch(url, {
+                    method: 'GET',
+                    credentials: 'include',
+                });
+                const text = await r.text();
+                let body = text;
+                try { body = JSON.parse(text); } catch {}
+                return {
+                    status: r.status,
+                    ok: r.ok,
+                    body_preview: typeof body === 'string'
+                        ? body.slice(0, 500)
+                        : JSON.stringify(body).slice(0, 500),
+                    code: typeof body === 'object' ? body.code : null,
+                    msg: typeof body === 'object' ? body.msg : null,
+                };
+            } catch (e) {
+                return { error: String(e) };
+            }
+        }""",
+        [api_url],
+    )
+    print(f"    status   : {res_b.get('status')}")
+    print(f"    code/msg : {res_b.get('code')} / {res_b.get('msg')}")
+    print(f"    body     : {res_b.get('body_preview')}")
+
+    # ----- 5) explore 페이지 네비게이션 (X-c 후보) — 빠른 sanity check -----
+    print(f"\n[5] /user/profile/{user_id} 네비게이션 (X-c 후보) + 네트워크 sniff")
+    profile_url = f"https://www.xiaohongshu.com/user/profile/{user_id}"
+
+    # 네트워크 listener — 더 넓은 필터로 모든 xhs/edith/rednote 호출 캡처
+    captured = []
+    console_msgs = []
+
+    def _on_response(response):
+        try:
+            url = response.url
+            if any(d in url for d in (
+                "xiaohongshu.com", "edith.xiaohongshu.com",
+                "rednote.com", "xhs.cn",
+            )) and any(p in url for p in ("/api/", "/web/", "user_posted", "sns")):
+                req = response.request
+                captured.append({
+                    "url": url,
+                    "status": response.status,
+                    "method": req.method,
+                    "req_headers": {k.lower(): v for k, v in req.headers.items()},
+                })
+        except Exception:
+            pass
+
+    def _on_console(msg):
+        try:
+            if msg.type in ("error", "warning"):
+                console_msgs.append({"type": msg.type, "text": msg.text[:300]})
+        except Exception:
+            pass
+
+    page.on("response", _on_response)
+    page.on("console", _on_console)
+
+    try:
+        page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+        # 더 길게 대기 + 한 번 스크롤해서 lazy-load 트리거 시도
+        time.sleep(8)
+        try:
+            page.mouse.wheel(0, 800)
+            time.sleep(2)
+            page.mouse.wheel(0, 800)
+            time.sleep(2)
+        except Exception:
+            pass
+        time.sleep(4)
+        state_check = page.evaluate(
+            """() => {
+                const has = !!window.__INITIAL_STATE__;
+                const out = { has_initial_state: has };
+                try {
+                    const u = window.__INITIAL_STATE__?.user;
+                    out.user_keys = u ? Object.keys(u) : null;
+                    // Vue 3 reactive ref unwrap
+                    const unwrap = (v) => {
+                        if (v && typeof v === 'object' && '_value' in v) return v._value;
+                        return v;
+                    };
+                    const notes = unwrap(u?.notes);
+                    out.notes_type = Array.isArray(notes)
+                        ? `array(len=${notes.length})`
+                        : (typeof notes);
+                    if (Array.isArray(notes) && notes.length > 0) {
+                        // 첫 페이지(보통 length 1)의 첫 노트
+                        const firstPage = notes[0];
+                        out.first_page_type = Array.isArray(firstPage)
+                            ? `array(len=${firstPage.length})` : typeof firstPage;
+                        if (Array.isArray(firstPage) && firstPage.length > 0) {
+                            const n = firstPage[0];
+                            out.first_note_keys = n ? Object.keys(n) : null;
+                            out.first_note_sample = JSON.stringify(n).slice(0, 400);
+                        }
+                    } else {
+                        out.notes_value_sample = JSON.stringify(notes).slice(0, 200);
+                    }
+                    // userPageData 같은 다른 경로도 시도
+                    if (u) {
+                        out.alt_keys_with_note = Object.keys(u).filter(k =>
+                            k.toLowerCase().includes('note') ||
+                            k.toLowerCase().includes('post')
+                        );
+                    }
+                } catch (e) {
+                    out.error = String(e);
+                }
+                return out;
+            }"""
+        )
+        for k, v in state_check.items():
+            print(f"    {k:24s}: {v}")
+
+        # HTML raw 확인 — script 태그 안 __INITIAL_STATE__에 노트 들어있나
+        print(f"\n[5b] HTML raw __INITIAL_STATE__ 안 'noteId'/'note_id' 키워드 카운트")
+        html = page.content()
+        count_camel = html.count('"noteId"')
+        count_snake = html.count('"note_id"')
+        count_xsec = html.count('xsec_token')
+        print(f"    \"noteId\"     : {count_camel}")
+        print(f"    \"note_id\"    : {count_snake}")
+        print(f"    xsec_token   : {count_xsec}")
+    except Exception as e:
+        print(f"    네비게이션 실패: {e}")
+    finally:
+        try:
+            page.remove_listener("response", _on_response)
+        except Exception:
+            pass
+        try:
+            page.remove_listener("console", _on_console)
+        except Exception:
+            pass
+
+    # ----- 5c) 스크린샷 + 봇 감지 흔적 + 페이지 텍스트 일부 -----
+    print(f"\n[5c] 화면 캡처 + 봇 탐지 흔적")
+    try:
+        diag_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "output"))
+        os.makedirs(diag_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        png = os.path.join(diag_dir, f"diag_probe_{ts}.png")
+        page.screenshot(path=png, full_page=True)
+        print(f"    screenshot   : {png}")
+
+        bot_check = page.evaluate(
+            """() => ({
+                webdriver: navigator.webdriver,
+                ua: navigator.userAgent,
+                lang: navigator.language,
+                plugins: navigator.plugins ? navigator.plugins.length : null,
+                automation: !!window.cdc_adoQpoasnfa76pfcZLmcfl_Array
+                    || !!window.__nightmare
+                    || !!window.callPhantom,
+                title: document.title,
+                body_text: (document.body?.innerText || '').slice(0, 200),
+                url: location.href,
+                has_initial: !!window.__INITIAL_STATE__,
+                a1_local: localStorage.getItem('a1'),
+                cookie_has_a1: /(?:^|; )a1=/.test(document.cookie),
+            })"""
+        )
+        for k, v in bot_check.items():
+            print(f"    {k:14s}: {str(v)[:200]}")
+    except Exception as e:
+        print(f"    스크린샷/검사 실패: {e}")
+
+    # ----- 5d) console 에러/경고 -----
+    print(f"\n[5d] console 에러/경고 ({len(console_msgs)}건)")
+    for i, m in enumerate(console_msgs[:10], 1):
+        print(f"    [{i}] {m['type']}: {m['text']}")
+
+    # ----- 5e) window의 sign 관련 함수 후보 나열 -----
+    print(f"\n[5e] window의 sign 관련 함수 키")
+    try:
+        sign_keys = page.evaluate(
+            """() => {
+                const out = [];
+                for (const k of Object.keys(window)) {
+                    const lk = k.toLowerCase();
+                    if (lk.includes('sign')
+                        || lk.includes('xhs')
+                        || lk.includes('msx')
+                        || lk.includes('webms')
+                        || lk.startsWith('_web')) {
+                        let t = typeof window[k];
+                        out.push({ name: k, type: t });
+                    }
+                }
+                return out;
+            }"""
+        )
+        for s in sign_keys[:30]:
+            print(f"    {s['name']:35s}: {s['type']}")
+    except Exception as e:
+        print(f"    조사 실패: {e}")
+
+    # ----- 6) 페이지가 자체적으로 호출한 API 캡처 결과 -----
+    print(f"\n[6] 페이지 내부 API 호출 캡처 (axios 인터셉터가 박는 진짜 헤더)")
+    print(f"    캡처 건수: {len(captured)}")
+    for i, c in enumerate(captured[:5], 1):
+        rh = c["req_headers"]
+        print(f"    [{i}] {c['method']} {c['url'][:90]}")
+        print(f"        status       : {c['status']}")
+        print(f"        x-s          : {(rh.get('x-s') or '')[:60]}")
+        print(f"        x-t          : {rh.get('x-t')}")
+        print(f"        x-s-common   : {(rh.get('x-s-common') or '')[:60]}")
+        print(f"        x-mns        : {rh.get('x-mns')}")
+        print(f"        x-b3-traceid : {rh.get('x-b3-traceid')}")
+        print(f"        x-xray-traceid: {rh.get('x-xray-traceid')}")
+
+    # ----- 7) xhs.help.sign으로 x-s-common 만들어서 fetch 재시도 -----
+    print(f"\n[7] 전략 C — xhs.help.sign로 x-s-common 추가 (X-b' 후보)")
+    try:
+        from xhs.help import sign as xhs_sign
+        a1_value = sign_info.get("a1_doc_cookie")
+        if not a1_value:
+            print(f"    a1 cookie 없어서 skip")
+        else:
+            try:
+                signed = xhs_sign(sample_uri, None, a1=a1_value)
+                print(f"    xhs_sign keys: {list(signed.keys())}")
+                full_headers = {k.lower(): str(v) for k, v in signed.items()}
+                res_c = page.evaluate(
+                    """async ([url, headers]) => {
+                        try {
+                            const r = await fetch(url, {
+                                method: 'GET',
+                                credentials: 'include',
+                                headers,
+                            });
+                            const text = await r.text();
+                            let body = text;
+                            try { body = JSON.parse(text); } catch {}
+                            return {
+                                status: r.status,
+                                code: typeof body === 'object' ? body.code : null,
+                                msg: typeof body === 'object' ? body.msg : null,
+                                note_count: typeof body === 'object'
+                                    && body.data && body.data.notes
+                                    ? body.data.notes.length : null,
+                                body_preview: typeof body === 'string'
+                                    ? body.slice(0, 400)
+                                    : JSON.stringify(body).slice(0, 400),
+                            };
+                        } catch (e) {
+                            return { error: String(e) };
+                        }
+                    }""",
+                    [api_url, full_headers],
+                )
+                print(f"    status     : {res_c.get('status')}")
+                print(f"    code/msg   : {res_c.get('code')} / {res_c.get('msg')}")
+                print(f"    note_count : {res_c.get('note_count')}")
+                print(f"    body       : {res_c.get('body_preview')}")
+            except Exception as e:
+                print(f"    xhs_sign 호출 실패: {type(e).__name__}: {e}")
+    except ImportError as e:
+        print(f"    xhs.help import 실패: {e}")
+
+    print(f"\n{'='*60}")
+    print(f"  PROBE 완료 — 결과 보고 X-a/X-b/X-c 결정")
+    print(f"{'='*60}\n")
 
 
 def make_sign_function(page):
@@ -395,6 +812,11 @@ def main():
 
         # 재사용 위해 파일로 저장 (cookie_test.py 등에서 활용)
         save_cookies_for_reuse(context, source_note="hybrid_test")
+
+        # ===== Probe 모드 — X 아키텍처 진단 후 조기 종료 =====
+        if args.probe:
+            run_probe(page, args.user_id)
+            return
 
         # XhsClient 셋업
         sign_func = make_sign_function(page)
