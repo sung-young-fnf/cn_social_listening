@@ -331,6 +331,14 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         headers = await self._pre_headers(uri, params={})
         async with make_async_client(proxy=self.proxy) as client:
             response = await client.get(f"{self._host}{uri}", headers=headers)
+            cookie_str = headers.get("Cookie", "") or headers.get("cookie", "")
+            has_a1 = "a1=" in cookie_str
+            has_web_session = "web_session=" in cookie_str
+            utils.logger.info(
+                f"[query_self DEBUG] status={response.status_code} "
+                f"cookie_len={len(cookie_str)} a1={has_a1} web_session={has_web_session} "
+                f"body={response.text[:400]}"
+            )
             if response.status_code == 200:
                 return response.json()
         return None
