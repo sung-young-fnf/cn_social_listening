@@ -132,9 +132,9 @@ STOP_WORDS_FILE = "./docs/hit_stopwords.txt"
 FONT_PATH = "./docs/STZHONGS.TTF"
 
 # Crawl interval (요청 사이 sleep, 초)
-# 2초는 봇으로 즉시 식별. 12~20초로 인간 패턴에 가깝게.
-# 차단 회복 후 작은 규모(1~5명) 검증할 땐 더 크게 잡는 것 권장.
-CRAWLER_MAX_SLEEP_SEC = 15
+# 정책: 한국 IP + rotation 환경에서는 5초 (사용자 명시).
+# 한국 IP는 정상 사용자 IP라 짧은 간격 봇 의심 적음.
+CRAWLER_MAX_SLEEP_SEC = 5
 
 from .bilibili_config import *
 from .xhs_config import *

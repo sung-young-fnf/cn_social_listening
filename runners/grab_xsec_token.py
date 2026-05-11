@@ -23,15 +23,26 @@ from playwright.async_api import async_playwright
 
 
 def _build_oxylabs_proxy():
-    """oxylabs_proxy.py와 동일 형식 — sticky session username.
+    """한국 IP + 세션 단위 sticky + 세션 간 rotation.
 
-    OXYLABS_SESSID env 박으면 main.py와 같은 IP 사용 가능 (cookie/토큰 매칭).
+    sessid env 없으면 자동 random 생성 → 이 프로세스 안에서 동일 유지.
     """
-    base_user = os.getenv("OXYLABS_USERNAME", "customer-prcs_data1_LpjIC-cc-cn")
-    sessid = os.getenv("OXYLABS_SESSID") or secrets.token_hex(8)
+    base_user = os.getenv("OXYLABS_USERNAME", "customer-prcs_data1_LpjIC")
+    country = os.getenv("OXYLABS_COUNTRY", "kr")
+    if "-cc-" in base_user:
+        username_base = base_user
+    else:
+        username_base = f"{base_user}-cc-{country}"
+    sessid = os.getenv("OXYLABS_SESSID")
+    if not sessid:
+        sessid = f"auto_{secrets.token_hex(4)}"
+        os.environ["OXYLABS_SESSID"] = sessid
+        mode = "AUTO-STICKY"
+    else:
+        mode = "STICKY (env)"
     sesstime = os.getenv("OXYLABS_SESSTIME", "30")
-    username = f"{base_user}-sessid-{sessid}-sesstime-{sesstime}"
-    print(f"[grab] OxylabsProxy sessid={sessid} sesstime={sesstime}m")
+    username = f"{username_base}-sessid-{sessid}-sesstime-{sesstime}"
+    print(f"[grab] {mode} sessid={sessid} country={country}")
     return {
         "server": f"http://{os.getenv('OXYLABS_HOST', 'pr.oxylabs.io')}:"
                   f"{os.getenv('OXYLABS_PORT', '7777')}",
