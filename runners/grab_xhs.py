@@ -34,7 +34,12 @@ import sys
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
+import requests
+import urllib3
 from playwright.async_api import async_playwright
+
+# 이미지 CDN cert chain 가끔 이슈 — verify=False 사용 시 경고 억제
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # .env 로드 (Oxylabs 자격증명 등) — 없어도 silent fail
 try:
@@ -89,6 +94,39 @@ POST_COLUMNS = [
     # 검증/이미지 다운로드용 추가 컬럼 (운영 schema 외)
     "cover_url", "image_urls", "video_url",
 ]
+
+
+# === user_id → nickname 매핑 (xhs_config.py 주석에서 추출) ===
+# 검색 박스 진입 시 검색어로 사용. xhs WAF가 직접 URL 입력을 차단하므로
+# 닉네임으로 검색 → 결과 클릭 흐름이 필수.
+def load_xhs_creator_map(config_path=None):
+    """xhs_config.py의 'URL  # nickname' 주석에서 {user_id: nickname} 추출.
+
+    형식: "https://www.xiaohongshu.com/user/profile/<uid>",  # <nickname>
+    """
+    if config_path is None:
+        config_path = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "crawlers", "mediacrawler-config", "xhs_config.py"
+        ))
+    if not os.path.isfile(config_path):
+        print(f"[creator-map] 파일 없음 — {config_path}")
+        return {}
+
+    pattern = re.compile(r'/user/profile/([a-f0-9]+)[^#]*#\s*(.+?)\s*$')
+    mapping = {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            for line in f:
+                m = pattern.search(line.rstrip())
+                if m:
+                    uid = m.group(1)
+                    nickname = m.group(2).strip()
+                    if uid and nickname:
+                        mapping[uid] = nickname
+    except Exception as e:
+        print(f"[creator-map] 로드 실패: {e}")
+    return mapping
 
 
 # === 시스템 Chrome 경로 ===
@@ -235,51 +273,122 @@ WEB_SESSION_MIN_LEN = 50
 
 
 async def is_real_login(page, ctx):
-    """여러 신호의 OR 조합 — 하나라도 통과하면 진짜 로그인."""
-    # 1) URL /login 강제 리다이렉트 = 비로그인 (조기 종료)
+    """엄격한 로그인 판별 — `loggedIn._value`가 최우선 신호.
+
+    우선순위:
+      1. URL `/login` redirect → 비로그인 확정
+      2. `__INITIAL_STATE__.user.loggedIn._value` (양쪽 방향 모두 신뢰)
+         - True → 로그인 확정
+         - False → 비로그인 확정 (★ unread/web_session 잔재 cookie 무시)
+         - undefined/없음 → 3번 fallback
+      3. cookie fallback (state 못 받을 때만)
+         - id_token = anonymous 못 받음 → 단독 True
+         - 그 외는 AND 조합으로만 (unread alone은 절대 X)
+      4. placeholder `登录` 키워드 negative 최종 검사
+
+    5/13 진단 확인: xhs가 anonymous에게도 unread cookie 발급 → 기존 OR 로직이 거짓
+    True 반환 → QR 모달 안 띄움 → 익명 상태로 검색 → 검색 결과 제한 → SKIP.
+    이 버그가 운영 자체를 불가능하게 만들어서 엄격화 필수.
+    """
+    # 1) URL /login redirect = 비로그인 확정
     try:
         if "/login" in page.url and "redirectPath" in page.url:
             return False
     except Exception:
         pass
 
-    # 2) cookie 신호 (xhs + rednote 둘 다 처리)
+    # 2) loggedIn._value 직접 확인 — 가장 강한 신호 (양쪽 방향)
+    logged_in_value = None
+    try:
+        result = await page.evaluate("""() => {
+            const u = window.__INITIAL_STATE__?.user;
+            if (!u) return null;
+            const v = u.loggedIn;
+            if (v === undefined) return null;
+            // Vue ref unwrap: v._value 우선, 없으면 v를 bool
+            if (v && typeof v === 'object' && '_value' in v) return v._value;
+            return !!v;
+        }""")
+        if result is True:
+            logged_in_value = True
+        elif result is False:
+            logged_in_value = False
+    except Exception:
+        pass
+
+    if logged_in_value is True:
+        return True
+    if logged_in_value is False:
+        return False  # ★ 강한 negative — unread/web_session 잔재 무시
+
+    # 3) state 못 받음 → cookie 신호 fallback
+    # id_token은 anonymous 발급 못 받음 → 단독 True OK
+    # 다른 신호는 잔재 위험 → AND 조합으로만
     try:
         cookies = await ctx.cookies()
         xhs_cookies = [c for c in cookies if is_xhs_cookie(c)]
+        has_id_token = False
+        has_unread = False
         web_session_val = ""
-        has_unread = False  # unread cookie는 로그인 시에만 발급 (본인 user_id 박힘)
         for c in xhs_cookies:
-            if c.get("name") == "web_session":
+            name = c.get("name")
+            if name == "id_token":
+                has_id_token = True
+            elif name == "web_session":
                 web_session_val = c.get("value", "")
-            elif c.get("name") == "unread":
+            elif name == "unread":
                 has_unread = True
-        # web_session 길이 임계 통과 → strong signal
-        if len(web_session_val) >= WEB_SESSION_MIN_LEN:
+        if has_id_token:
             return True
-        # unread cookie 존재 → 로그인 확정 (anonymous 못 받음)
-        if has_unread:
+        if has_unread and len(web_session_val) >= WEB_SESSION_MIN_LEN:
             return True
     except Exception:
         pass
 
-    # 3) 페이지 내부 신호 (placeholder + loggedIn._value)
+    # 4) placeholder negative 최종 검사
     try:
-        return bool(await page.evaluate("""() => {
-            // placeholder의 登录 키워드 → 비로그인
+        has_login_placeholder = await page.evaluate("""() => {
             const inputs = document.querySelectorAll('input');
             for (const i of inputs) {
-                if ((i.placeholder || '').includes('登录')) return false;
+                if ((i.placeholder || '').includes('登录')) return true;
             }
-            // INITIAL_STATE.user.loggedIn (Vue ref unwrap)
-            const u = window.__INITIAL_STATE__?.user;
-            if (!u) return false;
-            const v = u.loggedIn;
-            const loggedIn = v?._value !== undefined ? v._value : !!v;
-            return !!loggedIn;
-        }"""))
+            return false;
+        }""")
+        if has_login_placeholder:
+            return False
     except Exception:
-        return False
+        pass
+
+    return False
+
+
+async def verify_login_stable(page, ctx, timeout=30, stable_count=2, interval=3):
+    """QR 로그인 직후 state 안정화 대기.
+
+    `is_real_login`이 transient하게 True ↔ False 깜빡이는 케이스 방어.
+    예: QR 스캔 직후 → cookie 발급 OK but rednote redirect 진행 중 →
+        __INITIAL_STATE__.user.loggedIn._value가 잠시 False → 몇 초 뒤 True 갱신.
+
+    stable_count회 연속 True 관찰되면 안정화 확정. timeout까지 못 받으면 False 반환.
+    """
+    start = asyncio.get_event_loop().time()
+    consecutive_true = 0
+    last_print = 0
+    while asyncio.get_event_loop().time() - start < timeout:
+        if await is_real_login(page, ctx):
+            consecutive_true += 1
+            if consecutive_true >= stable_count:
+                elapsed = asyncio.get_event_loop().time() - start
+                print(f"  ✓ 로그인 안정화 ({elapsed:.1f}초, {stable_count}회 연속 True)")
+                return True
+        else:
+            consecutive_true = 0
+        elapsed = int(asyncio.get_event_loop().time() - start)
+        if elapsed - last_print >= 10:
+            print(f"     안정화 대기... 남은 {timeout-elapsed}초")
+            last_print = elapsed
+        await asyncio.sleep(interval)
+    return False
 
 
 async def save_cookies_to_file(ctx, label=""):
@@ -369,10 +478,109 @@ async def wait_for_qr_login(page, ctx, timeout=300):
     return False
 
 
+# === 검색 박스 진입 — 사용자 행동 모방으로 xhs WAF 통과 ===
+# xhs WAF가 직접 URL 입력(/user/profile/<uid>)을 봇으로 차단함 (첫 진입은 free pass).
+# 사람처럼 [홈 → 검색 → 결과 클릭] 흐름으로 진입하면 URL에 xsec_token + xsec_source=pc_search
+# 자동으로 박혀서 정상 인증된 진입으로 처리됨.
+async def navigate_via_search(page, user_id, nickname):
+    """검색 박스 + Enter → 검색 결과 페이지에서 user 카드 href 추출 → goto. 반환: (success, msg).
+
+    흐름 (사용자 수동 검증):
+      검색박스 타이핑 → Enter → 검색 결과 페이지 → user 카드의 href 추출
+      → 현재 탭에서 page.goto (click은 새 탭 열어서 X)
+
+    핵심: click 대신 href 추출 + goto — xhs link가 target="_blank"라서
+    click 시 새 탭 열림 → 원래 탭은 search_result에 머무름 → 추출 실패.
+    """
+    # 1. 홈 진입
+    home_ok = False
+    for home_url in ("https://www.rednote.com/explore",
+                     "https://www.xiaohongshu.com/explore"):
+        try:
+            await page.goto(home_url, wait_until="domcontentloaded", timeout=20000)
+            home_ok = True
+            break
+        except Exception:
+            continue
+    if not home_ok:
+        return False, "홈 진입 실패"
+    await asyncio.sleep(2)
+
+    # 2. 검색 박스 찾기
+    search_selectors = [
+        "input[placeholder*='搜索小红书']",
+        "input[placeholder*='搜索']",
+        "input[type='search']",
+        ".search-input input",
+        "[class*='search-input'] input",
+        "input[class*='search']",
+    ]
+    search_input = None
+    for sel in search_selectors:
+        try:
+            elem = await page.wait_for_selector(sel, timeout=3000, state="visible")
+            if elem:
+                search_input = elem
+                break
+        except Exception:
+            continue
+    if not search_input:
+        return False, "검색 박스 selector 못 찾음"
+
+    # 3. 검색 박스에 닉네임 입력 + Enter
+    try:
+        await search_input.click()
+        await asyncio.sleep(0.3)
+        await search_input.fill("")  # 이전 검색 잔재 클리어
+        await asyncio.sleep(0.2)
+        await search_input.fill(nickname)
+        await asyncio.sleep(0.3)
+        await search_input.press("Enter")
+    except Exception as e:
+        return False, f"검색 입력/Enter 실패: {e}"
+
+    # 4. 검색 결과 페이지 로딩 대기
+    await asyncio.sleep(3)
+
+    # 5. 검색 결과에서 user_id 정확 매칭 link 찾기 (동명이인 방지)
+    user_link = page.locator(f"a[href*='/user/profile/{user_id}']").first
+    try:
+        await user_link.wait_for(state="visible", timeout=5000)
+    except Exception:
+        return False, f"검색 결과에 user_id={user_id[:10]}... 없음"
+
+    # 6. href 추출 → 현재 탭에서 navigate
+    # 클릭하면 target="_blank"라 새 탭 열려서 우리 page 변수가 못 따라감 → href + goto
+    # href에는 이미 ?xsec_token=...&xsec_source=pc_search 박혀있음
+    href = await user_link.get_attribute("href")
+    if not href:
+        return False, "user_link href 추출 실패"
+
+    # 상대 경로 절대 경로화
+    if href.startswith("/"):
+        base = "https://www.rednote.com" if "rednote.com" in page.url else "https://www.xiaohongshu.com"
+        href = f"{base}{href}"
+    elif not href.startswith("http"):
+        return False, f"href 형식 이상: {href[:60]}"
+
+    try:
+        await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+    except Exception as e:
+        return False, f"profile URL goto 실패: {e}"
+
+    # 7. URL 전환 검증
+    try:
+        await page.wait_for_url(f"**/user/profile/{user_id}*", timeout=10000)
+    except Exception:
+        return False, f"URL 미전환 (현재: {page.url[:100]})"
+
+    return True, f"OK ({nickname})"
+
+
 # === 노트 데이터 추출 — Listener(페이지 진입 전 등록) + State + DOM ===
 # 핵심: listener를 page.goto 전에 등록해야 페이지 자체 user_posted 첫 호출 캡처.
 # 이전 회귀 원인: collect_notes 안에서 등록했더니 이미 호출 끝난 후라 캡처 0건.
-async def collect_notes(page, user_id, max_pages=3, date_start=None, date_end=None):
+async def collect_notes(page, user_id, max_pages=3, date_start=None, date_end=None, nickname=None):
     """페이지 진입 전 listener 등록 → user_posted 응답 캡처 + State/DOM 보완.
 
     date_start 지정 시: listener에서 연속 older 노트 카운트.
@@ -439,10 +647,28 @@ async def collect_notes(page, user_id, max_pages=3, date_start=None, date_end=No
     print(f"  · listener 등록 (page.goto 전)")
 
     # === 페이지 진입 (listener 활성 상태) ===
-    try:
-        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
-    except Exception as e:
-        print(f"  · goto 실패: {e}")
+    # 정책: nickname 없거나 검색 실패 시 SKIP. direct fallback 안 함.
+    # 이유: /user/profile/{id} 직접 입력은 xhs WAF가 차단 + 로그인 모달 트리거 → 세션 위험 ↑
+    if not nickname:
+        print(f"  ⏭ SKIP: user_id={user_id[:10]}... — nickname 매핑 없음 (xhs_config.py 확인 필요)")
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
+        return {"notes": [], "author": "", "skipped": True, "skip_reason": "no_nickname"}
+
+    ok, msg = await navigate_via_search(page, user_id, nickname)
+    if not ok:
+        print(f"  ⏭ SKIP: {nickname} (user_id={user_id[:10]}...) — 검색 진입 실패: {msg}")
+        print(f"     direct fallback은 로그인 모달/세션 리스크라 안 함 — 다음 계정으로")
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
+        return {"notes": [], "author": nickname, "skipped": True,
+                "skip_reason": "search_failed", "skip_msg": msg}
+
+    print(f"  · 검색 진입 OK: {msg}")
 
     # 첫 user_posted 자체 호출 대기
     await asyncio.sleep(8)
@@ -621,16 +847,40 @@ async def collect_notes(page, user_id, max_pages=3, date_start=None, date_end=No
             merged.append({"noteId": nid, "xsec_token": "", "title": "", "type": "",
                           "likes": "", "comments": "", "stars": "", "shares": "", "cover": ""})
 
-    # author (nickname) 추출
-    author = await page.evaluate("""() => {
+    # 프로필 정보 추출 — basicInfo + interactions (팔로워/팔로잉/총좋아요/bio/avatar 등)
+    # s3_upload_xhs_account.py가 기대하는 필드 다 채움
+    profile_info = await page.evaluate("""() => {
         const u = window.__INITIAL_STATE__?.user;
-        if (!u) return '';
+        if (!u) return null;
         const unwrap = (v) => (v && typeof v === 'object' && '_value' in v) ? v._value : v;
         const upd = unwrap(u.userPageData);
-        return upd?.basicInfo?.nickname || '';
+        if (!upd) return null;
+        const basic = upd.basicInfo || {};
+        const inter = upd.interactions || [];
+        // interactions는 보통 [{type, name, count}, ...] 형태 — type별 count 매핑
+        const interMap = {};
+        if (Array.isArray(inter)) {
+            for (const i of inter) {
+                if (i && i.type) interMap[i.type] = i.count;
+            }
+        }
+        const tags = upd.tags || [];
+        return {
+            nickname: basic.nickname || '',
+            desc: basic.desc || '',
+            avatar: basic.imageb || basic.images || '',
+            gender: basic.gender,  // 0=비공개, 1=남, 2=여 (xhs 관례)
+            ip_location: basic.ipLocation || '',
+            red_id: basic.redId || '',
+            fans: interMap.fans || 0,
+            follows: interMap.follows || 0,
+            interaction: interMap.interaction || 0,
+            tag_list: Array.isArray(tags) ? tags : [],
+        };
     }""")
 
-    return {"notes": merged, "author": author or ""}
+    author = (profile_info or {}).get("nickname", "")
+    return {"notes": merged, "author": author, "profile": profile_info or {}}
 
 
 # === 노트 상세 페이지 진입 — comments/stars/shares/content 채움 ===
@@ -824,7 +1074,13 @@ def compute_date_range(args):
 def _note_to_ts(n):
     """노트의 시간 신호를 unix timestamp(float)로 변환. 없거나 파싱 불가 시 None.
 
-    우선순위: post_date(yyyy-mm-dd, detail에서 받은 정확값) > time(last_update_time, listener).
+    우선순위:
+      1. post_date(yyyy-mm-dd) — detail에서 받은 정확한 게시일 (가장 신뢰)
+      2. time(last_update_time, listener) — listener API 응답 (xhs가 줄 때만)
+      3. note_id 앞 8자리 hex — fallback (★ xhs note_id가 ObjectId 패턴이라 가정)
+          예: 69fd8676...000 → 0x69fd8676 = 1778652278 sec = 2026-04-22
+          listener time 빈 값일 때 마지막 안전망. 단 정확도는 createTime 대비
+          몇 시간/몇 일 오차 가능 (note_id 생성 시점 vs 게시 시점)
     """
     pd = n.get("post_date", "")
     if pd:
@@ -832,14 +1088,27 @@ def _note_to_ts(n):
             return datetime.strptime(pd, "%Y-%m-%d").timestamp()
         except ValueError:
             pass
+
     t = n.get("time")
-    if t in (None, ""):
-        return None
-    try:
-        t_int = int(t)
-        return t_int / 1000.0 if t_int > 10**12 else float(t_int)
-    except (ValueError, TypeError):
-        return None
+    if t not in (None, ""):
+        try:
+            t_int = int(t)
+            return t_int / 1000.0 if t_int > 10**12 else float(t_int)
+        except (ValueError, TypeError):
+            pass
+
+    # note_id hex decode fallback — listener time이 빈 값일 때 필터 살려주는 핵심
+    nid = n.get("noteId", "")
+    if nid and len(nid) >= 8:
+        try:
+            ts = float(int(nid[:8], 16))
+            # 합리적 범위 검증 (2020~2030 사이만 OK — 잘못된 hex 차단)
+            if 1577836800 <= ts <= 1893456000:  # 2020-01-01 ~ 2030-01-01
+                return ts
+        except ValueError:
+            pass
+
+    return None
 
 
 def filter_notes_by_date(notes, date_start, date_end):
@@ -883,7 +1152,7 @@ def make_output_base_dir(week=None):
     return base
 
 
-def write_mediacrawler_output(base_dir, user_id, author, notes):
+def write_mediacrawler_output(base_dir, user_id, author, notes, profile_info=None):
     """MediaCrawler 호환 포맷으로 저장 — uploaders/s3_upload_xhs_post.py가 그대로 읽음.
 
     구조:
@@ -896,6 +1165,11 @@ def write_mediacrawler_output(base_dir, user_id, author, notes):
         note_id, user_id, nickname, title, desc, type,
         liked_count, collected_count, comment_count, share_count,
         time (yyyy-mm-dd 문자열), ip_location, image_list (콤마 join), note_url
+
+    creator.json 필드 (s3_upload_xhs_account.py가 기대):
+        user_id, nickname, desc, avatar, gender, ip_location, red_id,
+        fans, follows, interaction, tag_list
+        profile_info=None이면 빈약한 creator.json (user_id+nickname만).
     """
     user_dir = os.path.join(base_dir, user_id)
     os.makedirs(user_dir, exist_ok=True)
@@ -950,11 +1224,105 @@ def write_mediacrawler_output(base_dir, user_id, author, notes):
         "user_id": user_id,
         "nickname": author,
     }
+    # profile_info 있으면 풍부한 creator.json (s3_upload_xhs_account.py 호환)
+    if profile_info:
+        creator_json.update({
+            "desc": profile_info.get("desc", ""),
+            "avatar": profile_info.get("avatar", ""),
+            "gender": profile_info.get("gender", 0),
+            "ip_location": profile_info.get("ip_location", ""),
+            "red_id": profile_info.get("red_id", ""),
+            "fans": profile_info.get("fans", 0),
+            "follows": profile_info.get("follows", 0),
+            "interaction": profile_info.get("interaction", 0),
+            "tag_list": profile_info.get("tag_list", []),
+        })
     creator_path = os.path.join(user_dir, "creator.json")
     with open(creator_path, "w", encoding="utf-8") as f:
         json.dump(creator_json, f, ensure_ascii=False, indent=2)
 
     return user_dir, len(notes_json)
+
+
+# === 이미지 다운로드 — Oxylabs 경유 (회사 IP 노출 X) ===
+# uploader는 <note_id>/0.jpg, 1.jpg... 같은 숫자 prefix 기대.
+# image_urls 순서대로 0, 1, 2... 로 저장.
+_IMAGE_HEADERS = {
+    "Referer": "https://www.xiaohongshu.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _proxy_to_requests_url(proxy):
+    """Playwright proxy dict → requests proxies URL 변환."""
+    if not proxy:
+        return None
+    host = proxy["server"].replace("http://", "").replace("https://", "")
+    return f"http://{proxy['username']}:{proxy['password']}@{host}"
+
+
+def _download_image_sync(url, save_path, proxy_url=None, timeout=30):
+    """단일 이미지 동기 다운로드. 성공 True / 실패 False.
+    성공 조건: HTTP 200 + 컨텐츠 ≥ 1KB.
+    """
+    try:
+        kwargs = {
+            "timeout": timeout,
+            "headers": _IMAGE_HEADERS,
+            "verify": False,
+        }
+        if proxy_url:
+            kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+        resp = requests.get(url, **kwargs)
+        if resp.status_code != 200:
+            return False
+        if len(resp.content) < 1024:
+            return False
+        with open(save_path, "wb") as f:
+            f.write(resp.content)
+        return True
+    except Exception:
+        return False
+
+
+async def download_note_images(note_dir, image_urls, proxy, concurrency=5, timeout=30):
+    """노트 이미지 병렬 다운로드 — 0.jpg, 1.jpg, ... 순서 저장.
+    asyncio.Semaphore로 동시성 제한 + asyncio.to_thread로 requests 비차단.
+    반환: (saved_count, failed_count)
+    """
+    if not image_urls:
+        return 0, 0
+    # 중복 제거 — 순서 보존
+    seen, unique = set(), []
+    for u in image_urls:
+        if u and u not in seen:
+            seen.add(u)
+            unique.append(u)
+    if not unique:
+        return 0, 0
+
+    os.makedirs(note_dir, exist_ok=True)
+    proxy_url = _proxy_to_requests_url(proxy)
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def one(idx, url):
+        async with sem:
+            base = url.split("?")[0]
+            ext = os.path.splitext(base)[-1].lower()
+            if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+                ext = ".jpg"
+            save_path = os.path.join(note_dir, f"{idx}{ext}")
+            return await asyncio.to_thread(
+                _download_image_sync, url, save_path, proxy_url, timeout
+            )
+
+    results = await asyncio.gather(*[one(i, u) for i, u in enumerate(unique)])
+    saved = sum(1 for r in results if r)
+    return saved, len(unique) - saved
 
 
 def write_csv(user_id, author, notes):
@@ -1041,6 +1409,14 @@ def parse_args():
     p.add_argument("--gap-max", type=float, default=7.0,
                    help="계정 간 최대 지터 (초, 기본 7)")
 
+    # === 이미지 다운로드 (기본 ON — S3 적재용) ===
+    p.add_argument("--no-images", action="store_true",
+                   help="이미지 다운로드 OFF (메타데이터만 빠르게)")
+    p.add_argument("--image-concurrency", type=int, default=5,
+                   help="이미지 동시 다운로드 수 (기본 5)")
+    p.add_argument("--image-timeout", type=int, default=30,
+                   help="이미지 1장당 timeout (초, 기본 30)")
+
     return p.parse_args()
 
 
@@ -1095,7 +1471,12 @@ async def main():
     output_base = make_output_base_dir(folder_week)
     print(f"[output] MediaCrawler 포맷 폴더: {output_base}")
     print(f"[batch ] {args.batch_size}명/배치, 휴식 {args.batch_rest//60}분, "
-          f"지터 {args.gap_min:.1f}~{args.gap_max:.1f}초\n")
+          f"지터 {args.gap_min:.1f}~{args.gap_max:.1f}초")
+
+    # creator nickname 매핑 로드 (xhs_config.py 주석에서) — 검색 진입용
+    creator_map = load_xhs_creator_map()
+    print(f"[creator-map] {len(creator_map)}개 닉네임 로드됨 "
+          f"({sum(1 for u in user_ids if u in creator_map)}/{len(user_ids)} 매칭)\n")
 
     # reset 옵션 처리
     if args.reset_session:
@@ -1181,10 +1562,15 @@ async def main():
                 print(f"[ERROR] QR 시간 초과")
                 await shutdown(ctx, args, reason="QR 로그인 시간 초과")
                 sys.exit(1)
-            # cookie 저장 전 충분히 대기 — id_token / unread 같은 후속 cookie 발급 시간 확보
-            await asyncio.sleep(12)
-            # [diag] QR 직후 + 12초 대기 후 — 1차 실행에서 cookie 완전체 확인
-            await diag_login_signals(page, ctx, label="QR 로그인 직후 (12초 대기 후)")
+            # QR 직후 — state 안정화 대기 (rednote redirect 중간이면 loggedIn 잠시 False 깜빡)
+            # 단순 12초 sleep 대신 loggedIn._value 연속 True 관찰로 확실히 안정화 확인
+            stable = await verify_login_stable(page, ctx, timeout=30, stable_count=2, interval=3)
+            if not stable:
+                print(f"  ⚠ 안정화 timeout — state 늦게 갱신될 수 있음. 그래도 진행")
+            # cookie 후속 발급 시간 + state hydrate 확보
+            await asyncio.sleep(5)
+            # [diag] 안정화 후 — 1차 실행에서 cookie 완전체 확인
+            await diag_login_signals(page, ctx, label="QR 로그인 안정화 후")
             await save_cookies_to_file(ctx, label="(new login) ")
 
         # === 배치 + 지터 순회 ===
@@ -1210,13 +1596,31 @@ async def main():
                     gap = random.uniform(args.gap_min, args.gap_max)
                     await asyncio.sleep(gap)
 
-                print(f"\n  [{global_idx}/{total}] user_id={uid}")
+                nickname = creator_map.get(uid)
+                nick_str = f" ({nickname})" if nickname else " (nickname 미등록)"
+                print(f"\n  [{global_idx}/{total}] user_id={uid}{nick_str}")
                 data = await collect_notes(page, uid, max_pages=args.max_pages,
-                                            date_start=date_start, date_end=date_end)
+                                            date_start=date_start, date_end=date_end,
+                                            nickname=nickname)
 
-                # 진입 후 로그인 상태 재확인 (cookie 무효화 / redirect 케이스)
-                if not await is_real_login(page, ctx):
-                    print(f"  ⚠ 비로그인 상태 — cookie 만료 추정. --reset-session으로 재실행 권장")
+                # SKIP 처리 — nickname 없음 또는 검색 실패 시 collect_notes가 일찍 반환
+                if data.get("skipped"):
+                    reason = data.get("skip_reason", "unknown")
+                    skip_nick = data.get("author") or nickname or "(unknown)"
+                    results[uid] = {
+                        "skipped": True,
+                        "reason": reason,
+                        "nickname": skip_nick,
+                        "msg": data.get("skip_msg", ""),
+                    }
+                    print(f"  → 건너뜀: {skip_nick} ({reason})")
+                    continue  # 다음 계정으로
+
+                # 진입 후 가벼운 세션 체크 — /login URL redirect만 검사
+                # is_real_login 호출 X (state가 transient False일 수 있어 오판 위험)
+                # state까지 보는 엄격한 검사는 초기 verify_login_stable에서 1회만 수행.
+                if "/login" in page.url:
+                    print(f"  ⚠ /login redirect 감지 — 세션 끊김. --reset-session 필요")
                     results[uid] = {"error": "session_invalid"}
                     session_invalid = True
                     break
@@ -1271,14 +1675,47 @@ async def main():
                 if empty_ids == len(notes) and len(notes) > 0:
                     print(f"  ⚠ 노트 ID 전부 빈 값 — 익명 추정 (검증 실패)")
                 else:
-                    # 1) 기존 CSV (검증/디버그용 — 19+3컬럼)
+                    # 1) 이미지 다운로드 (옵션 — S3 업로더가 <note_id>/N.jpg 기대)
+                    # CSV/JSON 저장 전에 해야 n["images_captured"]에 실제 성공 수 반영
+                    if not args.no_images:
+                        user_dir_for_imgs = os.path.join(output_base, uid)
+                        total_saved, total_failed, notes_with_img = 0, 0, 0
+                        for n in notes:
+                            note_id = n.get("noteId")
+                            if not note_id:
+                                continue
+                            img_urls = n.get("image_urls") or []
+                            # detail 안 받은 노트 — cover 1장으로 fallback
+                            if not img_urls and n.get("cover"):
+                                img_urls = [n["cover"]]
+                            if not img_urls:
+                                continue
+                            note_dir = os.path.join(user_dir_for_imgs, note_id)
+                            saved, failed = await download_note_images(
+                                note_dir, img_urls, proxy,
+                                concurrency=args.image_concurrency,
+                                timeout=args.image_timeout,
+                            )
+                            n["images_captured"] = saved
+                            total_saved += saved
+                            total_failed += failed
+                            if saved > 0:
+                                notes_with_img += 1
+                        print(f"  🖼  이미지: {notes_with_img}/{len(notes)} 노트 → "
+                              f"{total_saved}장 성공, {total_failed}장 실패")
+
+                    # 2) 기존 CSV (검증/디버그용 — 19+3컬럼)
                     csv_path = write_csv(uid, author, notes)
                     print(f"  💾 CSV: {csv_path}")
-                    # 2) MediaCrawler 호환 포맷 (S3 uploader 입력용)
+                    # 2) MediaCrawler 호환 포맷 (S3 uploader 입력용) + 프로필 메타데이터
                     user_dir, n_written = write_mediacrawler_output(
-                        output_base, uid, author, notes
+                        output_base, uid, author, notes,
+                        profile_info=data.get("profile"),
                     )
-                    print(f"  📁 MediaCrawler: {user_dir} ({n_written}개 노트, 익명 {empty_ids}개 skip)")
+                    profile_info = data.get("profile") or {}
+                    fans = profile_info.get("fans", 0)
+                    print(f"  📁 MediaCrawler: {user_dir} ({n_written}개 노트, "
+                          f"익명 {empty_ids}개 skip, fans={fans})")
                     # 샘플
                     for r_idx, n in enumerate(notes[:3]):
                         title = (n.get("title") or "")[:30]
@@ -1298,14 +1735,29 @@ async def main():
 
         # 요약
         print(f"\n{'='*50}\n  요약\n{'='*50}")
+        success_count = 0
+        skip_count = 0
+        error_count = 0
         for uid, r in results.items():
-            if "error" in r:
-                print(f"  {uid}: ❌ {r['error']}")
+            nick = r.get("nickname") or creator_map.get(uid, "")
+            uid_label = f"{uid[:10]}..."
+            nick_label = f" ({nick})" if nick else ""
+            if r.get("skipped"):
+                skip_count += 1
+                reason = r.get("reason", "unknown")
+                msg = r.get("msg", "")
+                detail = f" — {msg}" if msg else ""
+                print(f"  {uid_label}{nick_label}: ⏭ SKIP — {reason}{detail}")
+            elif "error" in r:
+                error_count += 1
+                print(f"  {uid_label}{nick_label}: ❌ {r['error']}")
             else:
-                print(f"  {uid}: ✅ {r['count']}개")
+                success_count += 1
+                print(f"  {uid_label}{nick_label}: ✅ {r.get('count', 0)}개")
+
+        print(f"\n  성공 {success_count} / 건너뜀 {skip_count} / 실패 {error_count}")
 
         # S3 업로드 명령 힌트
-        success_count = sum(1 for r in results.values() if "error" not in r)
         if success_count > 0:
             print(f"\n  S3 업로드 (dry-run 먼저 권장):")
             print(f"    python uploaders/s3_upload_xhs_post.py {output_base} --dry-run")
