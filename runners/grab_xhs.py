@@ -504,6 +504,7 @@ async def navigate_via_search(page, user_id, nickname):
             continue
     if not home_ok:
         return False, "홈 진입 실패"
+
     await asyncio.sleep(2)
 
     # 2. 검색 박스 찾기
@@ -528,8 +529,19 @@ async def navigate_via_search(page, user_id, nickname):
         return False, "검색 박스 selector 못 찾음"
 
     # 3. 검색 박스에 닉네임 입력 + Enter
+    # 패턴: click(활성화) → fill(클리어) → fill(입력) → Enter
+    # click 필수 — Vue 검색 박스가 focus 이벤트로 search 상태 활성화함
+    # fill만 쓰면 input value는 박히는데 Vue 내부 search state는 빈 채라 검색 fail (5/14 확인)
+    # click 3단계 fallback — pointer event 차단 환경 대비
     try:
-        await search_input.click()
+        try:
+            await search_input.click(timeout=5000)
+        except Exception:
+            try:
+                await search_input.click(force=True, timeout=5000)
+            except Exception:
+                # 마지막: JS focus
+                await search_input.evaluate("el => el.focus()")
         await asyncio.sleep(0.3)
         await search_input.fill("")  # 이전 검색 잔재 클리어
         await asyncio.sleep(0.2)
@@ -562,6 +574,11 @@ async def navigate_via_search(page, user_id, nickname):
         href = f"{base}{href}"
     elif not href.startswith("http"):
         return False, f"href 형식 이상: {href[:60]}"
+
+    # ★ &tab=note 제거 — 수동 클릭 URL엔 이 파라미터 없음.
+    # page.goto에 박힌 채로 보내면 xhs가 "no posts" 뷰 반환하는 케이스 확인됨 (5/14).
+    href = re.sub(r'[?&]tab=note(?=&|$)', '', href)
+    href = href.replace("?&", "?").rstrip("?&")
 
     try:
         await page.goto(href, wait_until="domcontentloaded", timeout=20000)
@@ -884,91 +901,179 @@ async def collect_notes(page, user_id, max_pages=3, date_start=None, date_end=No
 
 
 # === 노트 상세 페이지 진입 — comments/stars/shares/content 채움 ===
-async def collect_note_detail(page, note_id, xsec_token=""):
-    """노트 상세 페이지 진입 → __INITIAL_STATE__.note.noteDetailMap 추출.
+# === 노트 상세 추출 — JS hydrate state에서 detail dict 파싱 ===
+# 새 탭 / 같은 탭 modal / 같은 탭 navigate 모두 동일 로직으로 추출 가능.
+# noteDetailMap은 xhs가 detail 페이지 로드 시 채우는 state.
+_NOTE_DETAIL_EXTRACT_JS = """(noteId) => {
+    const state = window.__INITIAL_STATE__;
+    if (!state?.note?.noteDetailMap) return null;
+    const unwrap = (v) => (v && typeof v === 'object' && '_value' in v) ? v._value : v;
+    const map = unwrap(state.note.noteDetailMap);
+    if (!map) return null;
+    let entry = map[noteId];
+    if (!entry) {
+        const keys = Object.keys(map);
+        if (keys.length > 0) entry = map[keys[0]];
+    }
+    entry = unwrap(entry);
+    const note = entry?.note ? unwrap(entry.note) : entry;
+    if (!note) return null;
+    const inter = note.interactInfo || {};
+    const imgList = (note.imageList || []).map(img => {
+        return img.urlDefault || img.url || (img.infoList && img.infoList[0] && img.infoList[0].url) || '';
+    }).filter(u => u && u.length > 0);
+    let videoUrl = '';
+    if (note.video) {
+        videoUrl = note.video.media?.stream?.h264?.[0]?.masterUrl
+            || note.video.url || '';
+    }
+    return {
+        desc: note.desc || '',
+        title: note.title || '',
+        time: note.time || note.createTime || 0,
+        ip_location: note.ipLocation || note.ip_location || '',
+        type: note.type || '',
+        likes: inter.likedCount || '',
+        comments: inter.commentCount || '',
+        stars: inter.collectedCount || '',
+        shares: inter.shareCount || '',
+        image_count: imgList.length,
+        image_urls: imgList,
+        video_url: videoUrl,
+        user_nickname: note.user?.nickname || '',
+    };
+}"""
 
-    hydrate polling으로 늦은 SSR 대응. xsec_token 없으면 시도하되 실패율 ↑.
+_NOTE_DETAIL_HYDRATE_CHECK_JS = """(noteId) => {
+    const state = window.__INITIAL_STATE__;
+    if (!state?.note?.noteDetailMap) return false;
+    const unwrap = (v) => (v && typeof v === 'object' && '_value' in v) ? v._value : v;
+    const map = unwrap(state.note.noteDetailMap);
+    if (!map) return false;
+    let entry = map[noteId];
+    if (!entry) {
+        const keys = Object.keys(map);
+        if (keys.length === 0) return false;
+        entry = map[keys[0]];
+    }
+    entry = unwrap(entry);
+    const note = entry?.note ? unwrap(entry.note) : entry;
+    return !!(note && (note.desc !== undefined || note.interactInfo));
+}"""
+
+
+async def _extract_note_detail_from(target_page, note_id, hydrate_timeout=15):
+    """target_page (새 탭 또는 프로필 페이지)에서 노트 상세 추출.
+    noteDetailMap hydrate 폴링 후 evaluate.
     """
-    # xsec_token 없으면 skip (DOM fallback 노트 — 상세 진입 차단 가능성)
-    if not xsec_token:
-        return {"error": "no xsec_token (DOM fallback note — skip detail)"}
-
-    url = f"{XHS_POST_BASE_URL}{note_id}?xsec_token={xsec_token}&xsec_source=pc_user"
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    except Exception as e:
-        return {"error": f"goto: {e}"}
-
-    # noteDetailMap hydrate polling (최대 15초)
-    for _ in range(15):
+    # hydrate 폴링 (state에 detail 데이터 박힐 때까지)
+    for _ in range(hydrate_timeout):
         try:
-            has = await page.evaluate("""(noteId) => {
-                const state = window.__INITIAL_STATE__;
-                if (!state?.note?.noteDetailMap) return false;
-                const unwrap = (v) => (v && typeof v === 'object' && '_value' in v) ? v._value : v;
-                const map = unwrap(state.note.noteDetailMap);
-                if (!map) return false;
-                let entry = map[noteId];
-                if (!entry) {
-                    const keys = Object.keys(map);
-                    if (keys.length === 0) return false;
-                    entry = map[keys[0]];
-                }
-                entry = unwrap(entry);
-                const note = entry?.note ? unwrap(entry.note) : entry;
-                return !!(note && (note.desc !== undefined || note.interactInfo));
-            }""", note_id)
-            if has:
+            if await target_page.evaluate(_NOTE_DETAIL_HYDRATE_CHECK_JS, note_id):
                 break
         except Exception:
             pass
         await asyncio.sleep(1)
 
     try:
-        detail = await page.evaluate("""(noteId) => {
-            const state = window.__INITIAL_STATE__;
-            if (!state?.note?.noteDetailMap) return null;
-            const unwrap = (v) => (v && typeof v === 'object' && '_value' in v) ? v._value : v;
-            const map = unwrap(state.note.noteDetailMap);
-            if (!map) return null;
-            let entry = map[noteId];
-            if (!entry) {
-                const keys = Object.keys(map);
-                if (keys.length > 0) entry = map[keys[0]];
-            }
-            entry = unwrap(entry);
-            const note = entry?.note ? unwrap(entry.note) : entry;
-            if (!note) return null;
-            const inter = note.interactInfo || {};
-            // 이미지 URL 추출 (urlDefault → url 폴백)
-            const imgList = (note.imageList || []).map(img => {
-                return img.urlDefault || img.url || (img.infoList && img.infoList[0] && img.infoList[0].url) || '';
-            }).filter(u => u && u.length > 0);
-            // 영상 URL (있으면)
-            let videoUrl = '';
-            if (note.video) {
-                videoUrl = note.video.media?.stream?.h264?.[0]?.masterUrl
-                    || note.video.url || '';
-            }
-            return {
-                desc: note.desc || '',
-                title: note.title || '',
-                time: note.time || note.createTime || 0,
-                ip_location: note.ipLocation || note.ip_location || '',
-                type: note.type || '',
-                likes: inter.likedCount || '',
-                comments: inter.commentCount || '',
-                stars: inter.collectedCount || '',
-                shares: inter.shareCount || '',
-                image_count: imgList.length,
-                image_urls: imgList,
-                video_url: videoUrl,
-                user_nickname: note.user?.nickname || '',
-            };
-        }""", note_id)
-        return detail
+        detail = await target_page.evaluate(_NOTE_DETAIL_EXTRACT_JS, note_id)
+        return detail or {"error": "noteDetailMap 비어있음 (hydrate 실패)"}
     except Exception as e:
-        return {"error": f"evaluate: {e}"}
+        return {"error": f"evaluate 실패: {e}"}
+
+
+async def collect_note_detail(page, note_id, xsec_token=""):
+    """프로필 페이지에서 노트 thumbnail 클릭 → 상세 추출.
+
+    xhs WAF가 `page.goto(detail_url)`을 차단해서 click 패턴으로 전환 (5/14).
+    클릭 시 발생 가능한 3가지 케이스 모두 처리:
+
+      A. 새 탭 열림 (target="_blank") — 가장 흔함
+         → context.expect_page() 캐치 → 새 탭에서 추출 → close
+      B. 같은 탭 navigate (URL이 /explore/<id>로 변경)
+         → 현재 페이지에서 추출 → go_back()으로 프로필 복귀
+      C. modal 표시 (URL 변경 X, overlay)
+         → 현재 페이지 state에서 추출 (modal이 noteDetailMap populate)
+
+    프로필 page 변수는 호출 끝나도 프로필 페이지에 머무름.
+    """
+    # 프로필 페이지에서 해당 노트 thumbnail link 찾기
+    # selector를 note_id로만 매칭 — xhs는 /explore/, /note/, /discovery/item/ 패턴 혼용
+    # 24자 hex라 unique → false positive 위험 X
+    note_link = page.locator(f"a[href*='{note_id}']").first
+    try:
+        await note_link.wait_for(state="visible", timeout=5000)
+    except Exception:
+        return {"error": f"note link {note_id[:10]}... 못 찾음 (스크롤 밖일 수 있음)"}
+
+    initial_url = page.url
+    new_page = None
+
+    # 클릭 + 새 탭 감지 (target="_blank"인 경우)
+    # 3단계 fallback — 검색 박스 click 차단처럼 thumbnail도 pointer event 가로채일 수 있음
+    #   1) 일반 click — 정상 행동
+    #   2) force=True click — actionability 체크 무시
+    #   3) JS .click() evaluate — pointer event 시스템 자체 우회
+    try:
+        async with page.context.expect_page(timeout=5000) as page_info:
+            try:
+                await note_link.click(timeout=5000)
+            except Exception:
+                try:
+                    await note_link.click(force=True, timeout=5000)
+                except Exception:
+                    # 마지막 수단: JS로 직접 click() 호출
+                    await note_link.evaluate("el => el.click()")
+        new_page = await page_info.value
+    except Exception:
+        # 새 탭 안 열림 — modal 또는 same-tab navigation
+        pass
+
+    target = new_page or page
+
+    # 페이지 안정화 (새 탭이면 load 대기, modal이면 짧게)
+    if new_page:
+        try:
+            await target.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+    await asyncio.sleep(2)
+
+    # 추출
+    result = await _extract_note_detail_from(target, note_id, hydrate_timeout=15)
+
+    # 정리:
+    #   A. 새 탭 → close
+    #   B. 모달 + URL pushState (/user/profile → /explore) → Escape 키로 닫기
+    #      Escape으로 안 되면 go_back으로 URL 복귀
+    if new_page:
+        try:
+            await new_page.close()
+        except Exception:
+            pass
+    elif page.url != initial_url and "/explore/" in page.url:
+        # 모달 닫기 — Escape 키 우선 (xhs SPA가 history.back 자동 처리)
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(1.5)
+        except Exception:
+            pass
+        # URL 복귀 안 됐으면 go_back으로 강제
+        if page.url != initial_url:
+            try:
+                await page.go_back(wait_until="domcontentloaded", timeout=10000)
+                await asyncio.sleep(1.5)
+            except Exception:
+                pass
+        # 그래도 안 되면 명시적 navigate (안전망)
+        if page.url != initial_url:
+            try:
+                await page.goto(initial_url, wait_until="domcontentloaded", timeout=10000)
+                await asyncio.sleep(1.5)
+            except Exception:
+                pass
+
+    return result
 
 
 # === 유틸 ===
