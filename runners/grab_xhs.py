@@ -1444,10 +1444,14 @@ def write_csv(user_id, author, notes):
 # === 메인 ===
 def parse_args():
     p = argparse.ArgumentParser(
-        description="XHS 크롤러. 인자 없이 실행하면 지난주(월~일) 자동 필터.",
+        description=(
+            "XHS 전체 운영 크롤러 — xhs_config.py의 모든 creator를 자동 크롤링.\n"
+            "  지난주 자동: python runners/grab_xhs.py --reset-session --detail-count 10\n"
+            "  특정 주차:   python runners/grab_xhs.py --reset-session --week 0420\n"
+            "특정 uid 박는 검증/디버그용은 grab_xhs_refactor.py 사용."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("user_ids", help="user_id (콤마로 여러 명)")
     p.add_argument("--reset-session", action="store_true", help="user_data_dir + cookie 리셋 (QR 재발급)")
     p.add_argument("--max-pages", type=int, default=3)
     p.add_argument("--detail-count", type=int, default=None,
@@ -1517,7 +1521,15 @@ async def shutdown(ctx, args, reason=""):
 async def main():
     args = parse_args()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    user_ids = [u.strip() for u in args.user_ids.split(",") if u.strip()]
+
+    # creator nickname 매핑 로드 (xhs_config.py 주석에서) — 검색 진입용 + 운영 대상 user_id 목록
+    creator_map = load_xhs_creator_map()
+    if not creator_map:
+        print(f"[FAIL] xhs_config.py에서 creator 매핑 못 받음.")
+        print(f"       crawlers/mediacrawler-config/xhs_config.py의 '/user/profile/<uid>  # <nickname>' 주석 확인.")
+        sys.exit(1)
+    user_ids = list(creator_map.keys())
+    print(f"[creator-map] xhs_config.py 전체 {len(user_ids)}명 운영 대상으로 로드")
 
     # 날짜 범위 결정 (--all / --date-start/end / --week / --days / 기본=지난주)
     try:
@@ -1553,12 +1565,7 @@ async def main():
     output_base = make_output_base_dir(folder_week)
     print(f"[output] MediaCrawler 포맷 폴더: {output_base}")
     print(f"[batch ] {args.batch_size}명/배치, 휴식 {args.batch_rest//60}분, "
-          f"지터 {args.gap_min:.1f}~{args.gap_max:.1f}초")
-
-    # creator nickname 매핑 로드 (xhs_config.py 주석에서) — 검색 진입용
-    creator_map = load_xhs_creator_map()
-    print(f"[creator-map] {len(creator_map)}개 닉네임 로드됨 "
-          f"({sum(1 for u in user_ids if u in creator_map)}/{len(user_ids)} 매칭)\n")
+          f"지터 {args.gap_min:.1f}~{args.gap_max:.1f}초\n")
 
     # reset 옵션 처리
     if args.reset_session:
