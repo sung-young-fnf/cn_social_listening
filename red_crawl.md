@@ -114,29 +114,62 @@ COMPANY_IP_PREFIX=...
 
 ## 7. 실행 방법
 
-### 기본 — 지난주 자동 + detail 10개 + 이미지 다운로드
+`grab_xhs.py` = **운영 전용** (xhs_config.py 전체 자동 크롤링, uid 인자 없음).
+`grab_xhs_refactor.py` = **검증/디버그용** (특정 uid 박아서 1-N계정 테스트).
+
+### 7.1 운영 — `grab_xhs.py` (xhs_config.py 전체 자동)
+
+#### 전주 크롤링 (매주 월요일 운영)
+xhs_config.py에 등록된 모든 creator를 지난주(월~일) 기준으로 크롤링. detail 10개 + 이미지/영상 다운로드.
 ```bash
-python runners/grab_xhs_copy.py uid1,uid2,uid3 \
-  --reset-session --detail-count 10
+python runners/grab_xhs.py --reset-session --detail-count 10
 ```
 
-### 디버그 (--keep-open + 1계정)
+#### 특정 주차 백필
+한 달 전 데이터부터 일주일씩 끊어서 백필. `--week` 지정 시 `--detail-count`는 자동으로 `-1`(전체).
 ```bash
-python runners/grab_xhs_copy.py 5a16311de8ac2b349577ec8e \
+python runners/grab_xhs.py --reset-session --week 0420
+python runners/grab_xhs.py --reset-session --week 0427
+python runners/grab_xhs.py --reset-session --week 0504
+```
+
+#### keep-open (운영 중 브라우저 살림 — 진단/검증용)
+```bash
+python runners/grab_xhs.py --reset-session --detail-count 10 --keep-open
+```
+
+### 7.2 검증/디버그 — `grab_xhs_refactor.py` (특정 uid 지정)
+
+운영 전에 1-N계정 테스트로 흐름 검증. uid 직접 박음.
+```bash
+# 단일 계정 검증
+python runners/grab_xhs_refactor.py 5aae4070e8ac2b068d00451d \
+  --reset-session --detail-count 5
+
+# 여러 계정 (콤마)
+python runners/grab_xhs_refactor.py 5a16311de8ac2b349577ec8e,5aae4070e8ac2b068d00451d \
+  --reset-session --detail-count 5
+
+# F12 분석용 (브라우저 살림)
+python runners/grab_xhs_refactor.py 5a16311de8ac2b349577ec8e \
   --reset-session --detail-count 5 --keep-open
 ```
 
-### 옵션
+### 7.3 공통 옵션
 ```
 --reset-session       — user_data_dir + cookie 삭제 (QR 다시)
---detail-count N      — 노트당 detail 진입 개수 (0=skip, -1=전체, 10 권장)
---no-images           — 이미지 다운로드 OFF
+--detail-count N      — 노트당 detail 진입 개수 (0=skip, -1=전체). 미지정 시 자동:
+                        지난주 자동 모드면 0, 특정 날짜 범위 지정 시 -1
+--no-images           — 이미지/영상 다운로드 OFF
 --week MMDD/YYMMDD    — 주차 명시 (기본: 지난주 자동)
+--date-start/end      — 임의 날짜 범위 (yyyy-mm-dd)
+--days N              — 최근 N일
 --all                 — 날짜 필터 OFF
 --batch-size N        — N명/배치 (기본 10)
 --batch-rest SEC      — 배치 휴식 초 (기본 1800)
 --gap-min/max SEC     — 계정 간 지터 (기본 4-7)
 --keep-open           — 종료 시 브라우저 살림 (F12 디버그용)
+--image-concurrency N — 이미지 동시 다운로드 수 (기본 5)
 ```
 
 ## 8. 출력 구조
@@ -211,7 +244,8 @@ output/xhs_session_state.json          ← sessid + last_ip
 - 4계정 multi-influencer 안정성 검증
 - 50계정 중간 테스트 (배치/휴식 안정성)
 - 210계정 풀 운영
-- `grab_xhs_copy.py` 변경을 `grab_xhs.py`에 반영
+- `grab_xhs_copy.py` 변경을 `grab_xhs.py`에 반영 
+   -> 반영 완료
 
 ## 11. S3 업로드
 
