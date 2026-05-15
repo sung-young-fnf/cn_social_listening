@@ -1347,13 +1347,16 @@ def _download_image_sync(url, save_path, proxy_url=None, timeout=30):
             kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
         resp = requests.get(url, **kwargs)
         if resp.status_code != 200:
+            print(f"    ⚠ img status {resp.status_code}: {url[:60]}")
             return False
         if len(resp.content) < 1024:
+            print(f"    ⚠ img too small ({len(resp.content)}B): {url[:60]}")
             return False
         with open(save_path, "wb") as f:
             f.write(resp.content)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"    ⚠ img error: {type(e).__name__}: {url[:60]}")
         return False
 
 

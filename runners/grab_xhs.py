@@ -32,7 +32,7 @@ import secrets
 import shutil
 import sys
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 import urllib3
@@ -529,9 +529,10 @@ async def navigate_via_search(page, user_id, nickname):
         return False, "검색 박스 selector 못 찾음"
 
     # 3. 검색 박스에 닉네임 입력 + Enter
-    # 패턴: click(활성화) → fill(클리어) → fill(입력) → Enter
-    # click 필수 — Vue 검색 박스가 focus 이벤트로 search 상태 활성화함
-    # fill만 쓰면 input value는 박히는데 Vue 내부 search state는 빈 채라 검색 fail (5/14 확인)
+    # 패턴: click(활성화) → keyboard.type(focused element에 직접) → Enter
+    # 이유: xhs가 click 시 search overlay 모달 띄움 → 그 안에 NEW input이 focus 받음
+    #       search_input.fill()은 underlying header input을 가리키는 stale 참조라 작동 X
+    #       page.keyboard.type()은 현재 focused element에 입력 → overlay 모달 input에 들어감
     # click 3단계 fallback — pointer event 차단 환경 대비
     try:
         try:
@@ -542,12 +543,16 @@ async def navigate_via_search(page, user_id, nickname):
             except Exception:
                 # 마지막: JS focus
                 await search_input.evaluate("el => el.focus()")
-        await asyncio.sleep(0.3)
-        await search_input.fill("")  # 이전 검색 잔재 클리어
+        await asyncio.sleep(0.5)  # overlay 모달 뜰 시간 확보
+        # Ctrl+A → Backspace로 기존 텍스트 클리어 (fill 대신)
+        await page.keyboard.press("Control+A")
+        await asyncio.sleep(0.1)
+        await page.keyboard.press("Backspace")
         await asyncio.sleep(0.2)
-        await search_input.fill(nickname)
+        # 키보드로 직접 타이핑 — focused element (overlay input)에 들어감
+        await page.keyboard.type(nickname, delay=50)
         await asyncio.sleep(0.3)
-        await search_input.press("Enter")
+        await page.keyboard.press("Enter")
     except Exception as e:
         return False, f"검색 입력/Enter 실패: {e}"
 
@@ -983,97 +988,55 @@ async def _extract_note_detail_from(target_page, note_id, hydrate_timeout=15):
 
 
 async def collect_note_detail(page, note_id, xsec_token=""):
-    """프로필 페이지에서 노트 thumbnail 클릭 → 상세 추출.
+    """새 탭에서 detail URL 직접 진입 → state 추출 → 탭 닫기 (5/14 패턴).
 
-    xhs WAF가 `page.goto(detail_url)`을 차단해서 click 패턴으로 전환 (5/14).
-    클릭 시 발생 가능한 3가지 케이스 모두 처리:
+    이전 시도들의 한계:
+      - page.goto(xhs.com/explore/...): xhs WAF가 xiaohongshu.com 도메인 차단
+      - 프로필 thumbnail click: lazy-load로 visible 실패 + 모달 처리 복잡
+    새 방식:
+      - context.new_page() — 같은 context의 새 탭 (cookies/auth 공유)
+      - rednote.com/explore/<note_id>?xsec_token=...&xsec_source=pc_user
+      - 사용자 F12 검증으로 동작 확인됨
 
-      A. 새 탭 열림 (target="_blank") — 가장 흔함
-         → context.expect_page() 캐치 → 새 탭에서 추출 → close
-      B. 같은 탭 navigate (URL이 /explore/<id>로 변경)
-         → 현재 페이지에서 추출 → go_back()으로 프로필 복귀
-      C. modal 표시 (URL 변경 X, overlay)
-         → 현재 페이지 state에서 추출 (modal이 noteDetailMap populate)
-
-    프로필 page 변수는 호출 끝나도 프로필 페이지에 머무름.
+    핵심 정보 출처:
+      - note_id, xsec_token: user_posted listener 응답에서 받은 것 (note별 토큰)
+      - 프로필 page는 영향 받지 않음 (별도 탭)
     """
-    # 프로필 페이지에서 해당 노트 thumbnail link 찾기
-    # selector를 note_id로만 매칭 — xhs는 /explore/, /note/, /discovery/item/ 패턴 혼용
-    # 24자 hex라 unique → false positive 위험 X
-    note_link = page.locator(f"a[href*='{note_id}']").first
+    if not xsec_token:
+        return {"error": "no xsec_token (DOM fallback note — skip detail)"}
+
+    # 같은 context의 새 탭 — cookies/auth 공유, 프로필 page에 영향 X
+    new_page = await page.context.new_page()
     try:
-        await note_link.wait_for(state="visible", timeout=5000)
-    except Exception:
-        return {"error": f"note link {note_id[:10]}... 못 찾음 (스크롤 밖일 수 있음)"}
-
-    initial_url = page.url
-    new_page = None
-
-    # 클릭 + 새 탭 감지 (target="_blank"인 경우)
-    # 3단계 fallback — 검색 박스 click 차단처럼 thumbnail도 pointer event 가로채일 수 있음
-    #   1) 일반 click — 정상 행동
-    #   2) force=True click — actionability 체크 무시
-    #   3) JS .click() evaluate — pointer event 시스템 자체 우회
-    try:
-        async with page.context.expect_page(timeout=5000) as page_info:
-            try:
-                await note_link.click(timeout=5000)
-            except Exception:
-                try:
-                    await note_link.click(force=True, timeout=5000)
-                except Exception:
-                    # 마지막 수단: JS로 직접 click() 호출
-                    await note_link.evaluate("el => el.click()")
-        new_page = await page_info.value
-    except Exception:
-        # 새 탭 안 열림 — modal 또는 same-tab navigation
-        pass
-
-    target = new_page or page
-
-    # 페이지 안정화 (새 탭이면 load 대기, modal이면 짧게)
-    if new_page:
+        # xsec_token에 +, /, & 같은 특수문자 섞일 수 있어서 URL encoding 필수.
+        # quote(safe='') = 모든 reserved 문자 인코딩 (=, +, /, & 등 다 안전).
+        # note_id는 24자 hex라 인코딩 불필요하지만 일관성 위해 quote 적용.
+        encoded_note_id = quote(note_id, safe="")
+        encoded_token = quote(xsec_token, safe="")
+        detail_url = (
+            f"https://www.rednote.com/explore/{encoded_note_id}"
+            f"?xsec_token={encoded_token}&xsec_source=pc_user"
+        )
         try:
-            await target.wait_for_load_state("domcontentloaded", timeout=15000)
-        except Exception:
-            pass
-    await asyncio.sleep(2)
+            await new_page.goto(detail_url, wait_until="domcontentloaded", timeout=20000)
+        except Exception as e:
+            return {"error": f"goto: {e}"}
 
-    # 추출
-    result = await _extract_note_detail_from(target, note_id, hydrate_timeout=15)
+        # /login redirect = 세션 죽음
+        if "/login" in new_page.url:
+            return {"error": "session lost — redirected to /login"}
 
-    # 정리:
-    #   A. 새 탭 → close
-    #   B. 모달 + URL pushState (/user/profile → /explore) → Escape 키로 닫기
-    #      Escape으로 안 되면 go_back으로 URL 복귀
-    if new_page:
+        await asyncio.sleep(2)  # hydrate 초기 대기
+
+        # 추출 (_extract_note_detail_from이 hydrate 폴링 + evaluate 처리)
+        return await _extract_note_detail_from(new_page, note_id, hydrate_timeout=15)
+
+    finally:
+        # 새 탭 close — 메모리/리소스 정리 (반드시)
         try:
             await new_page.close()
         except Exception:
             pass
-    elif page.url != initial_url and "/explore/" in page.url:
-        # 모달 닫기 — Escape 키 우선 (xhs SPA가 history.back 자동 처리)
-        try:
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(1.5)
-        except Exception:
-            pass
-        # URL 복귀 안 됐으면 go_back으로 강제
-        if page.url != initial_url:
-            try:
-                await page.go_back(wait_until="domcontentloaded", timeout=10000)
-                await asyncio.sleep(1.5)
-            except Exception:
-                pass
-        # 그래도 안 되면 명시적 navigate (안전망)
-        if page.url != initial_url:
-            try:
-                await page.goto(initial_url, wait_until="domcontentloaded", timeout=10000)
-                await asyncio.sleep(1.5)
-            except Exception:
-                pass
-
-    return result
 
 
 # === 유틸 ===
@@ -1384,13 +1347,16 @@ def _download_image_sync(url, save_path, proxy_url=None, timeout=30):
             kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
         resp = requests.get(url, **kwargs)
         if resp.status_code != 200:
+            print(f"    ⚠ img status {resp.status_code}: {url[:60]}")
             return False
         if len(resp.content) < 1024:
+            print(f"    ⚠ img too small ({len(resp.content)}B): {url[:60]}")
             return False
         with open(save_path, "wb") as f:
             f.write(resp.content)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"    ⚠ img error: {type(e).__name__}: {url[:60]}")
         return False
 
 
@@ -1769,8 +1735,10 @@ async def main():
                         else:
                             err = (detail or {}).get("error", "unknown")
                             print(f"✗ {err[:60]}")
+                        # 새 탭 패턴은 빠름 — 봇 감지 회피 위해 3-7초 랜덤 sleep
                         if i + 1 < target_count:
-                            await asyncio.sleep(3)
+                            detail_gap = random.uniform(3.0, 7.0)
+                            await asyncio.sleep(detail_gap)
                 notes = notes_list
                 author = data["author"]
                 print(f"  → 총 {len(notes)}개 노트 (author: {author})")
