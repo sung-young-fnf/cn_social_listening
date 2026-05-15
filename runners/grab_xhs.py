@@ -34,12 +34,7 @@ import sys
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, quote, urlparse
 
-import requests
-import urllib3
 from playwright.async_api import async_playwright
-
-# 이미지 CDN cert chain 가끔 이슈 — verify=False 사용 시 경고 억제
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # .env 로드 (Oxylabs 자격증명 등) — 없어도 silent fail
 try:
@@ -1281,6 +1276,7 @@ def write_mediacrawler_output(base_dir, user_id, author, notes, profile_info=Non
             "time": post_date_str,
             "ip_location": n.get("location", ""),
             "image_list": image_list_str,
+            "video_url": n.get("video_url", ""),
             "note_url": note_url,
         })
 
@@ -1312,58 +1308,64 @@ def write_mediacrawler_output(base_dir, user_id, author, notes, profile_info=Non
     return user_dir, len(notes_json)
 
 
-# === 이미지 다운로드 — Oxylabs 경유 (회사 IP 노출 X) ===
+# === 이미지 다운로드 — Playwright context.request (CORS 무관, proxy/cookies 자동) ===
+# 시행착오 정리:
+#   1. requests + Oxylabs: fingerprint 미스매치로 403
+#   2. page.evaluate(fetch): cross-origin CORS 차단으로 "Failed to fetch"
+#   3. context.request: 브라우저 외부 HTTP client + context proxy/cookies 자동 → 통과 ★
+# http→https 변환 필수 (rednotecdn http는 Oxylabs IP에 403, https는 통과 확인됨).
 # uploader는 <note_id>/0.jpg, 1.jpg... 같은 숫자 prefix 기대.
-# image_urls 순서대로 0, 1, 2... 로 저장.
-_IMAGE_HEADERS = {
-    "Referer": "https://www.xiaohongshu.com/",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-}
 
 
-def _proxy_to_requests_url(proxy):
-    """Playwright proxy dict → requests proxies URL 변환."""
-    if not proxy:
-        return None
-    host = proxy["server"].replace("http://", "").replace("https://", "")
-    return f"http://{proxy['username']}:{proxy['password']}@{host}"
+async def _download_via_page(page, url, save_path):
+    """context.request로 이미지 다운로드 → 디스크. 성공 True / 실패 False."""
+    if url.startswith("http://"):
+        url = "https://" + url[len("http://"):]
 
-
-def _download_image_sync(url, save_path, proxy_url=None, timeout=30):
-    """단일 이미지 동기 다운로드. 성공 True / 실패 False.
-    성공 조건: HTTP 200 + 컨텐츠 ≥ 1KB.
-    """
     try:
-        kwargs = {
-            "timeout": timeout,
-            "headers": _IMAGE_HEADERS,
-            "verify": False,
-        }
-        if proxy_url:
-            kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
-        resp = requests.get(url, **kwargs)
-        if resp.status_code != 200:
-            print(f"    ⚠ img status {resp.status_code}: {url[:60]}")
-            return False
-        if len(resp.content) < 1024:
-            print(f"    ⚠ img too small ({len(resp.content)}B): {url[:60]}")
-            return False
+        resp = await page.context.request.get(url, timeout=30000)
+    except Exception as e:
+        print(f"    ⚠ img request 실패: {type(e).__name__}: {url[:60]}")
+        return False
+
+    if not resp.ok:
+        print(f"    ⚠ img status {resp.status} (ctx-request): {url[:60]}")
+        return False
+
+    try:
+        body = await resp.body()
+    except Exception as e:
+        print(f"    ⚠ img body 실패: {type(e).__name__}: {url[:60]}")
+        return False
+
+    if len(body) < 1024:
+        print(f"    ⚠ img too small ({len(body)}B): {url[:60]}")
+        return False
+
+    try:
         with open(save_path, "wb") as f:
-            f.write(resp.content)
+            f.write(body)
         return True
     except Exception as e:
-        print(f"    ⚠ img error: {type(e).__name__}: {url[:60]}")
+        print(f"    ⚠ img save 실패: {type(e).__name__}: {url[:60]}")
         return False
 
 
-async def download_note_images(note_dir, image_urls, proxy, concurrency=5, timeout=30):
-    """노트 이미지 병렬 다운로드 — 0.jpg, 1.jpg, ... 순서 저장.
-    asyncio.Semaphore로 동시성 제한 + asyncio.to_thread로 requests 비차단.
-    반환: (saved_count, failed_count)
+async def download_note_video(page, note_dir, video_url):
+    """영상 노트의 video.mp4 저장. _download_via_page 재사용 (이미지와 동일 패턴).
+    반환: True/False.
+    """
+    if not video_url:
+        return False
+    os.makedirs(note_dir, exist_ok=True)
+    save_path = os.path.join(note_dir, "video.mp4")
+    return await _download_via_page(page, video_url, save_path)
+
+
+async def download_note_images(page, note_dir, image_urls, concurrency=5):
+    """페이지 컨텍스트에서 이미지 병렬 fetch — 0.jpg, 1.jpg, ... 순서 저장.
+    반환: (saved_count, failed_count).
+    page는 단일 인스턴스지만 브라우저 fetch는 multiplex 가능. Semaphore로 제어.
     """
     if not image_urls:
         return 0, 0
@@ -1377,7 +1379,6 @@ async def download_note_images(note_dir, image_urls, proxy, concurrency=5, timeo
         return 0, 0
 
     os.makedirs(note_dir, exist_ok=True)
-    proxy_url = _proxy_to_requests_url(proxy)
     sem = asyncio.Semaphore(max(1, concurrency))
 
     async def one(idx, url):
@@ -1387,9 +1388,7 @@ async def download_note_images(note_dir, image_urls, proxy, concurrency=5, timeo
             if ext not in (".jpg", ".jpeg", ".png", ".webp"):
                 ext = ".jpg"
             save_path = os.path.join(note_dir, f"{idx}{ext}")
-            return await asyncio.to_thread(
-                _download_image_sync, url, save_path, proxy_url, timeout
-            )
+            return await _download_via_page(page, url, save_path)
 
     results = await asyncio.gather(*[one(i, u) for i, u in enumerate(unique)])
     saved = sum(1 for r in results if r)
@@ -1451,9 +1450,11 @@ def parse_args():
     p.add_argument("user_ids", help="user_id (콤마로 여러 명)")
     p.add_argument("--reset-session", action="store_true", help="user_data_dir + cookie 리셋 (QR 재발급)")
     p.add_argument("--max-pages", type=int, default=3)
-    p.add_argument("--detail-count", type=int, default=0,
+    p.add_argument("--detail-count", type=int, default=None,
                    help="노트 상세 진입 개수 (comments/stars/shares/content 채우기). "
-                        "기본 0(목록만), -1이면 전체. 검증 시 5 권장")
+                        "미지정 시 자동: 지난주 자동 모드면 0(목록만), "
+                        "특정 날짜 범위(--week/--date-start/end/--days/--all) 지정 시 -1(전체). "
+                        "명시값 우선. 검증 시 5 권장")
     p.add_argument("--keep-open", action="store_true",
                    help="에러/완료 후에도 브라우저 안 닫음 (F12 Network 분석용). Ctrl+C 또는 Enter로 종료")
 
@@ -1485,8 +1486,6 @@ def parse_args():
                    help="이미지 다운로드 OFF (메타데이터만 빠르게)")
     p.add_argument("--image-concurrency", type=int, default=5,
                    help="이미지 동시 다운로드 수 (기본 5)")
-    p.add_argument("--image-timeout", type=int, default=30,
-                   help="이미지 1장당 timeout (초, 기본 30)")
 
     return p.parse_args()
 
@@ -1527,6 +1526,18 @@ async def main():
         print(f"[FAIL] {e}")
         sys.exit(1)
     print(f"[date-filter] {date_label}")
+
+    # detail-count 자동 결정 — 특정 날짜 범위는 전체 detail (백필 시나리오), 지난주 자동은 0
+    # 사용자가 명시적으로 박은 값은 그대로 사용
+    if args.detail_count is None:
+        explicit_range = bool(args.week or args.date_start or args.date_end
+                              or args.days or args.all)
+        args.detail_count = -1 if explicit_range else 0
+        mode = "전체(-1)" if args.detail_count == -1 else "목록만(0)"
+        print(f"[detail ] 자동 결정: {mode} "
+              f"({'특정 날짜 범위' if explicit_range else '지난주 자동'})")
+    else:
+        print(f"[detail ] 명시값: {args.detail_count}")
 
     # 출력 폴더 — 항상 YYMMDD 6자리 (uploader \d{6} 호환)
     # --week MMDD면 올해 prefix, --week YYMMDD면 그대로, 없으면 date_start로
@@ -1765,9 +1776,8 @@ async def main():
                                 continue
                             note_dir = os.path.join(user_dir_for_imgs, note_id)
                             saved, failed = await download_note_images(
-                                note_dir, img_urls, proxy,
+                                page, note_dir, img_urls,
                                 concurrency=args.image_concurrency,
-                                timeout=args.image_timeout,
                             )
                             n["images_captured"] = saved
                             total_saved += saved
@@ -1776,6 +1786,23 @@ async def main():
                                 notes_with_img += 1
                         print(f"  🖼  이미지: {notes_with_img}/{len(notes)} 노트 → "
                               f"{total_saved}장 성공, {total_failed}장 실패")
+
+                        # 영상 다운로드 — video_url 있는 노트만 video.mp4 저장
+                        video_saved, video_failed, notes_with_video = 0, 0, 0
+                        for n in notes:
+                            note_id = n.get("noteId")
+                            video_url = n.get("video_url") or ""
+                            if not note_id or not video_url:
+                                continue
+                            note_dir = os.path.join(user_dir_for_imgs, note_id)
+                            ok = await download_note_video(page, note_dir, video_url)
+                            if ok:
+                                video_saved += 1
+                                notes_with_video += 1
+                            else:
+                                video_failed += 1
+                        if video_saved or video_failed:
+                            print(f"  🎬 영상: {notes_with_video}개 성공, {video_failed}개 실패")
 
                     # 2) 기존 CSV (검증/디버그용 — 19+3컬럼)
                     csv_path = write_csv(uid, author, notes)
