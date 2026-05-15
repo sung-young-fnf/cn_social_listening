@@ -1478,8 +1478,8 @@ def parse_args():
     # === 배치 + 지터 (xhs 봇 감지 회피) ===
     p.add_argument("--batch-size", type=int, default=10,
                    help="배치 당 계정 수 (기본 10)")
-    p.add_argument("--batch-rest", type=int, default=1800,
-                   help="배치 사이 휴식 (초, 기본 1800=30분). 0이면 휴식 없음")
+    p.add_argument("--batch-rest", type=int, default=600,
+                   help="배치 사이 휴식 (초, 기본 600=10분). 0이면 휴식 없음")
     p.add_argument("--gap-min", type=float, default=4.0,
                    help="계정 간 최소 지터 (초, 기본 4)")
     p.add_argument("--gap-max", type=float, default=7.0,
