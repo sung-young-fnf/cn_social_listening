@@ -23,7 +23,7 @@
 | 자격증명 | fail-closed (.env의 OXYLABS_USERNAME/PASSWORD 필수) |
 | 회사 IP 차단 | COMPANY_IP_PREFIX 매칭 시 즉시 종료 |
 | 계정 간 지터 | 4-7초 랜덤 |
-| 배치 휴식 | 10명/배치, 30분 휴식 (기본) |
+| 배치 휴식 | 10명/배치, 10분 휴식 (기본) |
 | 노트 detail 간 지터 | 3-7초 랜덤 |
 
 ## 3. 동작 원리 — 전체 흐름
@@ -155,7 +155,30 @@ python runners/grab_xhs_refactor.py 5a16311de8ac2b349577ec8e \
   --reset-session --detail-count 5 --keep-open
 ```
 
-### 7.3 공통 옵션
+### 7.3 키워드 검색 — `grab_xhs_keyword.py` (검증/시범)
+
+특정 키워드 검색 결과 페이지에서 listener(`/search/notes`) 캡처. CREATOR 모드와 분리.
+- 검색박스 keyboard.type → 결과 페이지 → UI 클릭 정렬(`最热` + `一周内`)
+- 응답에 좋아요/댓글/이미지 다 들어있어서 detail은 옵션 (default `-1` = 전체)
+- 출력: `output/red-keyword-YYMMDD/<keyword>/`
+
+```bash
+# 단일 키워드 검증
+python runners/grab_xhs_keyword.py 鞋 --reset-session
+
+# 여러 키워드 (콤마)
+python runners/grab_xhs_keyword.py 鞋,包,运动鞋 --reset-session
+
+# detail 안 들어가고 목록만 빠르게
+python runners/grab_xhs_keyword.py 鞋 --reset-session --detail-count 0
+
+# F12 분석용
+python runners/grab_xhs_keyword.py 鞋 --reset-session --keep-open
+```
+
+★ 검증 후 운영 자동화는 `xhs_config.py`의 `XHS_KEYWORD_LIST`를 읽는 방향으로 별건 진행.
+
+### 7.4 공통 옵션
 ```
 --reset-session       — user_data_dir + cookie 삭제 (QR 다시)
 --detail-count N      — 노트당 detail 진입 개수 (0=skip, -1=전체). 미지정 시 자동:
@@ -166,7 +189,7 @@ python runners/grab_xhs_refactor.py 5a16311de8ac2b349577ec8e \
 --days N              — 최근 N일
 --all                 — 날짜 필터 OFF
 --batch-size N        — N명/배치 (기본 10)
---batch-rest SEC      — 배치 휴식 초 (기본 1800)
+--batch-rest SEC      — 배치 휴식 초 (기본 600=10분)
 --gap-min/max SEC     — 계정 간 지터 (기본 4-7)
 --keep-open           — 종료 시 브라우저 살림 (F12 디버그용)
 --image-concurrency N — 이미지 동시 다운로드 수 (기본 5)
@@ -280,7 +303,7 @@ python uploaders/s3_upload_xhs_post.py output/red-weekly-YYMMDD
 [06:01] python runners/grab_xhs_copy.py uid1,...,uid210 --reset-session --detail-count 10
 [06:02] QR 모달 표시 → 폰으로 스캔 (30초)
 [06:03 ~ 21:00] 자동 진행
-  - 21배치 × 30분 휴식
+  - 21배치 × 10분 휴식
   - 각 계정: 검색 진입 + 노트 캡처 + detail × 10 (3-7초 간격) + 이미지 다운로드
   - 약 15시간 (이미지 + detail 포함, 추정)
 [21:00] python uploaders/s3_upload_xhs_post.py output/red-weekly-YYMMDD
