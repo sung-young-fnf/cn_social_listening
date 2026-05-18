@@ -14,12 +14,14 @@ import json
 import io
 import re
 import requests
+import urllib3
 import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 API_KEY = os.getenv("S3_API_KEY")
 BASE_URL = "https://aviyup1kyk.execute-api.ap-northeast-2.amazonaws.com/prod"
@@ -27,6 +29,39 @@ BUCKET = "svc-fnf-cn-mkt-s3"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DRY_RUN = "--dry-run" in sys.argv
+# 검증 전용: avatar 다운로드만 시도 → 로컬 저장. S3 PUT/parquet 빌드 X.
+AVATAR_TEST = "--avatar-test" in sys.argv
+
+# avatar 다운로드용 헤더 (Referer는 xhscdn 계열 검증 통과용)
+_AVATAR_HEADERS = {
+    "Referer": "https://www.xiaohongshu.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _build_oxylabs_proxy_url():
+    """Oxylabs KR Residential proxy URL 생성. .env에 자격증명 없으면 fail-closed.
+
+    회사 IP 노출 정책 — avatar 다운로드도 Oxylabs 거쳐야 안전.
+    """
+    user = os.getenv("OXYLABS_USERNAME")
+    pwd = os.getenv("OXYLABS_PASSWORD")
+    if not user or not pwd:
+        print("[FAIL] OXYLABS_USERNAME / OXYLABS_PASSWORD 환경변수 필수.")
+        print("       .env에 자격증명 박은 후 재실행. (회사 IP 보호 정책)")
+        sys.exit(1)
+    country = os.getenv("OXYLABS_COUNTRY", "kr")
+    if "-cc-" in user:
+        username = user
+    else:
+        username = f"{user}-cc-{country}"
+    host = os.getenv("OXYLABS_HOST", "pr.oxylabs.io")
+    port = os.getenv("OXYLABS_PORT", "7777")
+    return f"http://{username}:{pwd}@{host}:{port}"
 
 
 def parse_args():
@@ -93,17 +128,29 @@ def upload_file(s3_key, data):
 
 
 def build_parquet(creator, timestamp_str, image_path):
-    """creator.json을 S3 parquet 스키마로 변환"""
+    """creator.json을 S3 parquet 스키마로 변환.
+    gender는 int(1/2/0)로 박혀오고, tag_list는 list[dict]라
+    schema(string) 매핑을 위해 직렬화/문자열화 필요.
+    """
+    gender_raw = creator.get("gender", "")
+    gender_str = "" if gender_raw == "" or gender_raw is None else str(gender_raw)
+
+    tag_list_raw = creator.get("tag_list", [])
+    if isinstance(tag_list_raw, (list, dict)):
+        tag_list_str = json.dumps(tag_list_raw, ensure_ascii=False)
+    else:
+        tag_list_str = str(tag_list_raw) if tag_list_raw else ""
+
     data = {
         "user_id": [creator.get("user_id", "")],
         "nickname": [creator.get("nickname", "")],
-        "gender": [creator.get("gender", "")],
+        "gender": [gender_str],
         "desc": [creator.get("desc", "")],
         "ip_location": [creator.get("ip_location", "")],
         "fans": [parse_chinese_number(creator.get("fans", 0))],
         "following": [parse_chinese_number(creator.get("follows", 0))],
         "interaction": [parse_chinese_number(creator.get("interaction", 0))],
-        "tag_list": [creator.get("tag_list", "")],
+        "tag_list": [tag_list_str],
         "timestamp": [timestamp_str],
         "profile_image_path": [image_path],
     }
@@ -128,10 +175,21 @@ def build_parquet(creator, timestamp_str, image_path):
     return buf.getvalue()
 
 
-def download_avatar(url):
-    """샤오홍슈 avatar URL에서 이미지 다운로드"""
+def download_avatar(url, proxy_url=None):
+    """샤오홍슈 avatar URL에서 이미지 다운로드.
+
+    Oxylabs proxy 거치도록 변경 — 회사 IP 노출 방지.
+    Referer 박기 — xhscdn 계열 검증 통과용.
+    """
     try:
-        resp = requests.get(url, timeout=30)
+        kwargs = {
+            "timeout": 30,
+            "headers": _AVATAR_HEADERS,
+            "verify": False,
+        }
+        if proxy_url:
+            kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+        resp = requests.get(url, **kwargs)
         resp.raise_for_status()
         return resp.content
     except Exception as e:
@@ -143,11 +201,17 @@ def main():
     data_dir = parse_args()
     p_year, p_month, p_day = parse_date_from_dirname(data_dir)
 
-    if DRY_RUN:
+    # Oxylabs proxy URL — 모든 avatar 다운로드 시 적용 (fail-closed)
+    proxy_url = _build_oxylabs_proxy_url()
+
+    if AVATAR_TEST:
+        print("=== AVATAR TEST 모드 (다운로드 검증만, S3 PUT/parquet X) ===\n")
+    elif DRY_RUN:
         print("=== DRY RUN 모드 (실제 업로드 없음) ===\n")
 
     print(f"대상 폴더: {data_dir}")
-    print(f"파티션: p_year={p_year}/p_month={p_month}/p_day={p_day}\n")
+    print(f"파티션: p_year={p_year}/p_month={p_month}/p_day={p_day}")
+    print(f"proxy: {proxy_url.split('@')[-1]}\n")
 
     folders = sorted([
         f for f in os.listdir(data_dir)
@@ -155,6 +219,16 @@ def main():
     ])
 
     print(f"총 {len(folders)}개 계정 처리 예정\n")
+
+    # avatar 검증 결과 로컬 저장 경로
+    avatar_test_dir = None
+    if AVATAR_TEST:
+        ts = datetime.now().strftime("%y%m%d_%H%M%S")
+        avatar_test_dir = os.path.join(
+            os.path.dirname(BASE_DIR), "output", f"avatar_test_{ts}"
+        )
+        os.makedirs(avatar_test_dir, exist_ok=True)
+        print(f"[avatar-test] 로컬 저장 경로: {avatar_test_dir}\n")
 
     seen_user_ids = set()
     success = 0
@@ -184,6 +258,26 @@ def main():
         seen_user_ids.add(user_id)
 
         avatar_url = creator.get("avatar", "")
+
+        # === AVATAR TEST 모드 — 다운로드만 + 로컬 저장 ===
+        if AVATAR_TEST:
+            if not avatar_url:
+                print(f"[{i}/{len(folders)}] {folder} → {user_id} — avatar URL 없음, 건너뜀")
+                skipped += 1
+                continue
+            print(f"[{i}/{len(folders)}] {folder} → {user_id}")
+            img_data = download_avatar(avatar_url, proxy_url=proxy_url)
+            if img_data:
+                save_path = os.path.join(avatar_test_dir, f"{user_id}.png")
+                with open(save_path, "wb") as f:
+                    f.write(img_data)
+                print(f"    ✓ 다운로드 OK ({len(img_data):,} bytes) → {save_path}")
+                success += 1
+            else:
+                fail += 1
+            continue
+
+        # === 일반 모드 (DRY_RUN 또는 실제 업로드) ===
         timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # S3 경로 — user_id 기준
@@ -198,7 +292,7 @@ def main():
                 if DRY_RUN:
                     print(f"    [DRY] 이미지 → {image_key}")
                 else:
-                    img_data = download_avatar(avatar_url)
+                    img_data = download_avatar(avatar_url, proxy_url=proxy_url)
                     if img_data:
                         upload_file(image_key, img_data)
                         print(f"    이미지 업로드 완료 ({len(img_data):,} bytes)")
@@ -222,6 +316,8 @@ def main():
             fail += 1
 
     print(f"\n=== 완료: 성공 {success}, 실패 {fail}, 건너뜀 {skipped} ===")
+    if AVATAR_TEST and avatar_test_dir:
+        print(f"avatar 파일: {avatar_test_dir}")
 
 
 if __name__ == "__main__":
