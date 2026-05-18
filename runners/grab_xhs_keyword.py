@@ -57,13 +57,18 @@ from grab_xhs import (  # noqa: E402
 
 
 # === 검색 결과 페이지 진입 + 정렬 ===
-SORT_LABEL_HOT = "最热"   # 가장 많은 좋아요 (정렬)
-SORT_LABEL_WEEK = "一周内"  # 일주일 안 (시간 범위)
+# 사용자 확정 정렬 정책 (스크린샷 검증, 2026-05-18):
+#   排序依据: 最新 (최신순)
+#   发布时间: 不限 (전체) — default라 click 생략
+# HTML 구조 (확정):
+#   선택 전: <div class="filter"><span>筛选</span><svg/></div>
+#   선택 후: <div class="filter active"><span>已筛选</span><svg class="...active"/></div>
+SORT_LABEL_NEW = "最新"
 
 
 async def navigate_via_keyword(page, keyword):
-    """검색박스 keyboard.type → 결과 페이지 도달 → 정렬 UI 클릭(最热 + 一周内).
-    반환: (success, msg).
+    """검색박스 keyboard.type → 결과 페이지 도달 → 정렬 UI 클릭(最新).
+    시간은 default 不限이라 별도 click 안 함. 반환: (success, msg).
     """
     # 1-4단계: 홈 → 검색박스 → keyboard.type → Enter (creator와 공통)
     ok, msg = await _input_search_keyword(page, keyword)
@@ -76,62 +81,132 @@ async def navigate_via_keyword(page, keyword):
     except Exception:
         return False, f"검색 결과 URL 미전환 (현재: {page.url[:100]})"
 
-    # 6. 정렬 UI 클릭 — 排序(最热) + 时间(一周内)
-    # 筛选(필터) 드롭다운을 hover/click해서 패널 띄운 후 텍스트 매칭 click
+    # 6. 정렬 UI 클릭 — 排序(最新)
     await asyncio.sleep(1)
     sort_applied = await _apply_sort_filter(page)
     if sort_applied:
-        # 정렬 적용 후 응답 새로고침 대기 (listener가 새 응답 캡처)
+        # 정렬 적용 후 응답 새로고침 대기
         await asyncio.sleep(2)
-        print(f"  · 정렬 적용: {SORT_LABEL_HOT} + {SORT_LABEL_WEEK}")
+        print(f"  · 정렬 적용: {SORT_LABEL_NEW} (시간은 default 不限)")
     else:
-        print(f"  ⚠ 정렬 UI 못 찾음 — 기본 정렬(综合)로 진행")
+        print(f"  ⚠ 정렬 UI 적용 실패 — 기본 정렬(综合)로 진행")
 
     return True, "OK"
 
 
 async def _apply_sort_filter(page):
-    """筛选(필터) 패널 열고 最热 + 一周内 클릭. 성공 True / 실패 False.
+    """筛选 트리거 click → 패널 열림 검증 → 最新 click → '已筛选' 검증.
 
-    xhs UI는 보통 검색 결과 상단에 '筛选' 또는 정렬 드롭다운 아이콘이 있고,
-    클릭하면 패널이 펼쳐져서 排序/类型/时间 옵션 select 가능.
+    HTML 구조 (스크린샷 확정):
+      선택 전: <div class="filter"><span>筛选</span>...</div>
+      선택 후: <div class="filter active"><span>已筛选</span>...</div>
     """
-    # 筛选 트리거 — 텍스트/aria-label/class 등 다양한 selector 시도
-    trigger_selectors = [
-        "text=筛选",
-        "[class*='filter']",
-        "[class*='filter-trigger']",
-        "button:has-text('筛选')",
-    ]
-    triggered = False
-    for sel in trigger_selectors:
+    # 1. 筛选 트리거 — div.filter 중 텍스트 "筛选" 포함하는 것 (정공법)
+    trigger = page.locator("div.filter").filter(has_text="筛选").first
+    try:
+        await trigger.wait_for(state="visible", timeout=5000)
+    except Exception:
+        # 이미 선택된 상태(已筛选)이거나 selector 매칭 실패
         try:
-            elem = page.locator(sel).first
-            await elem.click(timeout=3000)
-            triggered = True
-            await asyncio.sleep(0.5)
+            trigger = page.locator("div.filter").filter(has_text="已筛选").first
+            await trigger.wait_for(state="visible", timeout=2000)
+            print(f"    · 이미 '已筛选' 상태 — 기존 필터 유지 추정")
+        except Exception:
+            print(f"    ⚠ 筛选 트리거 못 찾음")
+            return False
+
+    # 2. 트리거 click (3단계 fallback)
+    clicked = False
+    for try_method in (
+        lambda: trigger.click(timeout=3000),
+        lambda: trigger.click(force=True, timeout=3000),
+        lambda: trigger.evaluate("el => el.click()"),
+    ):
+        try:
+            await try_method()
+            clicked = True
             break
         except Exception:
             continue
+    if not clicked:
+        print(f"    ⚠ 筛选 트리거 click 실패")
+        return False
 
-    # 트리거 없어도 시도 (일부 UI는 항상 펼쳐져 있음)
-    success = False
-    for label in (SORT_LABEL_HOT, SORT_LABEL_WEEK):
+    # 3. 패널 열림 검증 — '排序依据' 헤더가 보이면 패널 열린 것
+    await asyncio.sleep(1.2)
+    panel_open = False
+    try:
+        cnt = await page.locator('text="排序依据"').count()
+        if cnt > 0:
+            panel_open = True
+    except Exception:
+        pass
+    if not panel_open:
+        # 한 번 더 트리거 click 시도 (force)
+        print(f"    · 패널 안 열림 — 재시도 (force click)")
         try:
-            # text 정확 매칭 우선, 안 되면 일부 매칭
-            await page.locator(f"text={label}").first.click(timeout=3000)
-            await asyncio.sleep(0.5)
-            success = True
+            await trigger.click(force=True, timeout=3000)
+            await asyncio.sleep(1.2)
+            cnt = await page.locator('text="排序依据"').count()
+            panel_open = cnt > 0
         except Exception:
-            # text= 안 되면 button/span 안의 텍스트로 시도
-            try:
-                await page.locator(f"button:has-text('{label}'), span:has-text('{label}')").first.click(timeout=3000)
-                await asyncio.sleep(0.5)
-                success = True
-            except Exception:
-                print(f"  ⚠ '{label}' 클릭 실패")
+            pass
+    if not panel_open:
+        print(f"    ⚠ 패널 열기 실패 — 排序依据 헤더 못 찾음")
+        return False
+    print(f"    · 패널 열림 OK (排序依据 헤더 감지)")
 
-    return success or triggered
+    # 4. 排序: 最新 click — 모든 visible 매칭을 차례로 시도 + 각 시도 후 '已筛选' 검증
+    # 페이지에 '最新' 텍스트가 여러 곳(상단 칩, 패널 옵션 등)에 있을 수 있음.
+    # first.click()이 잘못된 element를 잡으면 fail — visible 매칭 다 시도해서 진짜 옵션 찾기.
+    matches = page.get_by_text(SORT_LABEL_NEW, exact=True)
+    try:
+        match_count = await matches.count()
+    except Exception:
+        match_count = 0
+    print(f"    · '{SORT_LABEL_NEW}' 매칭 {match_count}개")
+    if match_count == 0:
+        print(f"    ⚠ '{SORT_LABEL_NEW}' 매칭 없음 — 패널 구조 변경 의심")
+        return False
+
+    applied = False
+    for i in range(match_count):
+        el = matches.nth(i)
+        try:
+            visible = await el.is_visible()
+        except Exception:
+            visible = False
+        if not visible:
+            continue
+
+        # 3단계 fallback (일반 → force → JS)
+        clicked_i = False
+        for try_method in (
+            lambda e=el: e.click(timeout=2000),
+            lambda e=el: e.click(force=True, timeout=2000),
+            lambda e=el: e.evaluate("el => el.click()"),
+        ):
+            try:
+                await try_method()
+                clicked_i = True
+                break
+            except Exception:
+                continue
+        if not clicked_i:
+            continue
+
+        # 즉시 검증 — 트리거가 '已筛选'로 바뀌었는지
+        await asyncio.sleep(0.7)
+        try:
+            applied = await page.locator("div.filter").filter(has_text="已筛选").count() > 0
+        except Exception:
+            applied = False
+        if applied:
+            print(f"    ✓ '{SORT_LABEL_NEW}' #{i} click 성공 — '已筛选' 검증 통과")
+            return True
+
+    print(f"    ⚠ '{SORT_LABEL_NEW}' click 모두 실패 또는 '已筛选' 미변경")
+    return False
 
 
 # === listener 캡처 + items 매핑 ===
