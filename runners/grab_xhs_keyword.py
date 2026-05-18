@@ -29,7 +29,7 @@ import random
 import re
 import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 from playwright.async_api import async_playwright
@@ -300,16 +300,50 @@ def write_keyword_output(base_dir, keyword, notes):
 
 
 # === 메인 ===
+def load_xhs_all_keywords():
+    """xhs_config.py에서 SEARCH_KEYWORDS + BRAND_KEYWORDS 합쳐서 반환.
+    중복 제거 + 순서 보존. 외부 적재 시스템이 type 구분 없이 한 폴더에 박는 구조라
+    같은 흐름으로 통합 처리.
+    """
+    config_path = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "crawlers", "mediacrawler-config", "xhs_config.py"
+    ))
+    if not os.path.isfile(config_path):
+        print(f"[FAIL] xhs_config.py 못 찾음 — {config_path}")
+        return []
+
+    # xhs_config 직접 import (mediacrawler-config 폴더 sys.path 추가)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_xhs_config", config_path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        print(f"[FAIL] xhs_config.py 로드 실패: {e}")
+        return []
+
+    search_kw = getattr(mod, "SEARCH_KEYWORDS", []) or []
+    brand_kw = getattr(mod, "BRAND_KEYWORDS", []) or []
+    merged = list(dict.fromkeys(list(search_kw) + list(brand_kw)))  # dedup + 순서 보존
+    print(f"[keyword-list] SEARCH {len(search_kw)}개 + BRAND {len(brand_kw)}개 "
+          f"→ 합쳐서 {len(merged)}개 (중복 제거)")
+    return merged
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description=(
             "XHS 키워드 검색 크롤러 — 검색 결과 페이지에서 listener 캡처.\n"
-            "  검증: python runners/grab_xhs_keyword.py 鞋 --reset-session\n"
-            "  여러 키워드: python runners/grab_xhs_keyword.py 鞋,包 --reset-session"
+            "  자동 전체: python runners/grab_xhs_keyword.py --reset-session\n"
+            "             (xhs_config.py SEARCH_KEYWORDS + BRAND_KEYWORDS 합쳐서)\n"
+            "  검증/특정: python runners/grab_xhs_keyword.py 鞋 --reset-session\n"
+            "  콤마 여러: python runners/grab_xhs_keyword.py 鞋,包 --reset-session"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("keywords", help="검색 키워드 (콤마로 여러 개)")
+    p.add_argument("keywords", nargs="?", default=None,
+                   help="검색 키워드 (콤마로 여러 개). 미지정 시 xhs_config.py 전체 자동")
     p.add_argument("--reset-session", action="store_true")
     p.add_argument("--detail-count", type=int, default=-1,
                    help="노트당 detail 진입 개수 (0=skip, -1=전체, 기본 -1)")
@@ -319,13 +353,25 @@ def parse_args():
     p.add_argument("--max-scrolls", type=int, default=10)
     p.add_argument("--gap-min", type=float, default=4.0)
     p.add_argument("--gap-max", type=float, default=7.0)
+    # 배치 + 휴식 — grab_xhs.py와 동일 정책 (10명/배치, 10분 휴식)
+    p.add_argument("--batch-size", type=int, default=10,
+                   help="배치 당 키워드 수 (기본 10)")
+    p.add_argument("--batch-rest", type=int, default=600,
+                   help="배치 사이 휴식 (초, 기본 600=10분). 0이면 휴식 없음")
     return p.parse_args()
 
 
 async def main():
     args = parse_args()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
+
+    # 키워드 결정: 인자 명시 > xhs_config.py 자동 로드
+    if args.keywords:
+        keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
+        print(f"[keyword-list] 명시값 {len(keywords)}개: {keywords}")
+    else:
+        keywords = load_xhs_all_keywords()
+
     if not keywords:
         print("[FAIL] 키워드가 비어있음.")
         sys.exit(1)
@@ -411,99 +457,124 @@ async def main():
             await diag_login_signals(page, ctx, label="QR 로그인 안정화 후")
             await save_cookies_to_file(ctx, label="(new login) ")
 
-        # === 키워드 순회 ===
+        # === 키워드 배치 순회 (grab_xhs.py와 동일 패턴) ===
+        # 10개/배치, 10분 휴식, 키워드 사이 4-7초 지터
         results = {}
-        for k_idx, keyword in enumerate(keywords, 1):
-            print(f"\n[{k_idx}/{len(keywords)}] keyword='{keyword}'")
+        total = len(keywords)
+        batch_size = max(1, args.batch_size)
+        n_batches = (total + batch_size - 1) // batch_size
+        print(f"\n[batch ] {batch_size}개/배치, 휴식 {args.batch_rest//60}분, "
+              f"지터 {args.gap_min:.1f}~{args.gap_max:.1f}초")
 
-            if k_idx > 1:
-                gap = random.uniform(args.gap_min, args.gap_max)
-                await asyncio.sleep(gap)
+        for batch_idx in range(n_batches):
+            b_start = batch_idx * batch_size
+            b_end = min(b_start + batch_size, total)
+            batch_kw = keywords[b_start:b_end]
+            now_str = datetime.now().strftime("%H:%M")
+            print(f"\n[배치 {batch_idx+1}/{n_batches}] ({now_str}) 키워드 {b_start+1}-{b_end} ({len(batch_kw)}개)")
 
-            notes, meta = await collect_notes_by_keyword(page, keyword, max_scrolls=args.max_scrolls)
-            if not notes:
-                err = meta.get("error") if isinstance(meta, dict) else None
-                print(f"  ⏭ SKIP: '{keyword}' — 노트 0개{f' ({err})' if err else ''}")
-                results[keyword] = {"count": 0, "skipped": True}
-                continue
+            for inner_idx, keyword in enumerate(batch_kw):
+                k_idx = b_start + inner_idx + 1
+                print(f"\n  [{k_idx}/{total}] keyword='{keyword}'")
 
-            # detail 진입 (default -1 = 전체)
-            if args.detail_count != 0:
-                target = len(notes) if args.detail_count == -1 else min(args.detail_count, len(notes))
-                print(f"\n  · 노트 상세 진입 ({target}개)")
-                for i, n in enumerate(notes[:target]):
-                    nid = n.get("noteId") or ""
-                    if not nid:
-                        continue
-                    print(f"    [{i+1}/{target}] {nid[:10]}... ", end="", flush=True)
-                    detail = await collect_note_detail(page, nid, n.get("xsec_token", ""))
-                    if detail and "error" not in detail:
-                        n["desc"] = detail.get("desc", "")
-                        n["post_date"] = format_post_date(detail.get("time"))
-                        n["location"] = detail.get("ip_location", "")
-                        n["images_captured"] = detail.get("image_count", 0)
-                        n["image_urls"] = detail.get("image_urls") or []
-                        n["video_url"] = detail.get("video_url", "")
-                        for k_fld in ("likes", "comments", "stars", "shares"):
-                            if detail.get(k_fld):
-                                n[k_fld] = detail[k_fld]
-                        img_count = len(n.get("image_urls") or [])
-                        print(f"✓ 댓글={detail.get('comments', 0)} 별={detail.get('stars', 0)} 이미지={img_count}")
-                    else:
-                        err = (detail or {}).get("error", "unknown")
-                        print(f"✗ {err[:60]}")
-                    if i + 1 < target:
-                        await asyncio.sleep(random.uniform(3.0, 7.0))
+                if k_idx > 1:
+                    gap = random.uniform(args.gap_min, args.gap_max)
+                    await asyncio.sleep(gap)
 
-            # 이미지/영상 다운로드
-            safe_keyword = re.sub(r'[\\/:*?"<>|]', "_", keyword).strip() or "unknown"
-            keyword_dir = os.path.join(output_base, safe_keyword)
-            os.makedirs(keyword_dir, exist_ok=True)
+                notes, meta = await collect_notes_by_keyword(page, keyword, max_scrolls=args.max_scrolls)
+                if not notes:
+                    err = meta.get("error") if isinstance(meta, dict) else None
+                    print(f"  ⏭ SKIP: '{keyword}' — 노트 0개{f' ({err})' if err else ''}")
+                    results[keyword] = {"count": 0, "skipped": True}
+                    continue
 
-            if not args.no_images:
-                total_saved, total_failed = 0, 0
-                for n in notes:
-                    nid = n.get("noteId")
-                    if not nid:
-                        continue
-                    img_urls = n.get("image_urls") or []
-                    if not img_urls and n.get("cover"):
-                        img_urls = [n["cover"]]
-                    if not img_urls:
-                        continue
-                    note_dir = os.path.join(keyword_dir, nid)
-                    saved, failed = await download_note_images(
-                        page, note_dir, img_urls,
-                        concurrency=args.image_concurrency,
-                    )
-                    n["images_captured"] = saved
-                    total_saved += saved
-                    total_failed += failed
-                print(f"  🖼  이미지: {total_saved}장 성공, {total_failed}장 실패")
+                # detail 진입 (default -1 = 전체)
+                if args.detail_count != 0:
+                    target = len(notes) if args.detail_count == -1 else min(args.detail_count, len(notes))
+                    print(f"\n  · 노트 상세 진입 ({target}개)")
+                    for i, n in enumerate(notes[:target]):
+                        nid = n.get("noteId") or ""
+                        if not nid:
+                            continue
+                        print(f"    [{i+1}/{target}] {nid[:10]}... ", end="", flush=True)
+                        detail = await collect_note_detail(page, nid, n.get("xsec_token", ""))
+                        if detail and "error" not in detail:
+                            n["desc"] = detail.get("desc", "")
+                            n["post_date"] = format_post_date(detail.get("time"))
+                            n["location"] = detail.get("ip_location", "")
+                            n["images_captured"] = detail.get("image_count", 0)
+                            n["image_urls"] = detail.get("image_urls") or []
+                            n["video_url"] = detail.get("video_url", "")
+                            for k_fld in ("likes", "comments", "stars", "shares"):
+                                if detail.get(k_fld):
+                                    n[k_fld] = detail[k_fld]
+                            img_count = len(n.get("image_urls") or [])
+                            print(f"✓ 댓글={detail.get('comments', 0)} 별={detail.get('stars', 0)} 이미지={img_count}")
+                        else:
+                            err = (detail or {}).get("error", "unknown")
+                            print(f"✗ {err[:60]}")
+                        if i + 1 < target:
+                            await asyncio.sleep(random.uniform(3.0, 7.0))
 
-                video_saved, video_failed = 0, 0
-                for n in notes:
-                    nid = n.get("noteId")
-                    vurl = n.get("video_url") or ""
-                    if not nid or not vurl:
-                        continue
-                    note_dir = os.path.join(keyword_dir, nid)
-                    if await download_note_video(page, note_dir, vurl):
-                        video_saved += 1
-                    else:
-                        video_failed += 1
-                if video_saved or video_failed:
-                    print(f"  🎬 영상: {video_saved}개 성공, {video_failed}개 실패")
+                # 이미지/영상 다운로드
+                safe_keyword = re.sub(r'[\\/:*?"<>|]', "_", keyword).strip() or "unknown"
+                keyword_dir = os.path.join(output_base, safe_keyword)
+                os.makedirs(keyword_dir, exist_ok=True)
 
-            # notes.json
-            written_dir, n_written = write_keyword_output(output_base, keyword, notes)
-            print(f"  📁 {written_dir} ({n_written}개 노트)")
-            # 샘플
-            for s_idx, n in enumerate(notes[:3]):
-                print(f"    [{s_idx}] {n['noteId'][:10]}... | {(n.get('title') or '')[:30]} | likes={n.get('likes', '')}")
-            results[keyword] = {"count": n_written, "dir": written_dir}
+                if not args.no_images:
+                    total_saved, total_failed = 0, 0
+                    for n in notes:
+                        nid = n.get("noteId")
+                        if not nid:
+                            continue
+                        img_urls = n.get("image_urls") or []
+                        if not img_urls and n.get("cover"):
+                            img_urls = [n["cover"]]
+                        if not img_urls:
+                            continue
+                        note_dir = os.path.join(keyword_dir, nid)
+                        saved, failed = await download_note_images(
+                            page, note_dir, img_urls,
+                            concurrency=args.image_concurrency,
+                        )
+                        n["images_captured"] = saved
+                        total_saved += saved
+                        total_failed += failed
+                    print(f"  🖼  이미지: {total_saved}장 성공, {total_failed}장 실패")
 
-        # 요약
+                    video_saved, video_failed = 0, 0
+                    for n in notes:
+                        nid = n.get("noteId")
+                        vurl = n.get("video_url") or ""
+                        if not nid or not vurl:
+                            continue
+                        note_dir = os.path.join(keyword_dir, nid)
+                        if await download_note_video(page, note_dir, vurl):
+                            video_saved += 1
+                        else:
+                            video_failed += 1
+                    if video_saved or video_failed:
+                        print(f"  🎬 영상: {video_saved}개 성공, {video_failed}개 실패")
+
+                # notes.json
+                written_dir, n_written = write_keyword_output(output_base, keyword, notes)
+                print(f"  📁 {written_dir} ({n_written}개 노트)")
+                # 샘플
+                for s_idx, n in enumerate(notes[:3]):
+                    print(f"    [{s_idx}] {n['noteId'][:10]}... | {(n.get('title') or '')[:30]} | likes={n.get('likes', '')}")
+                results[keyword] = {"count": n_written, "dir": written_dir}
+
+            # ↑ for inner_idx (키워드) loop 끝 — batch loop 안
+
+            # 배치 휴식 (마지막 배치는 휴식 안 함)
+            if batch_idx + 1 < n_batches and args.batch_rest > 0:
+                rest_min = args.batch_rest / 60
+                done_at = datetime.now().strftime("%H:%M")
+                resume_at = (datetime.now() + timedelta(seconds=args.batch_rest)).strftime("%H:%M")
+                print(f"\n  ✓ 배치 {batch_idx+1} 완료 ({done_at}) → {rest_min:.0f}분 휴식 (재개 {resume_at})")
+                await asyncio.sleep(args.batch_rest)
+
+        # 요약 (batch loop 밖)
         print(f"\n{'='*50}\n  요약\n{'='*50}")
         success_count = sum(1 for r in results.values() if not r.get("skipped"))
         skip_count = sum(1 for r in results.values() if r.get("skipped"))
