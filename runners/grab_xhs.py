@@ -477,15 +477,15 @@ async def wait_for_qr_login(page, ctx, timeout=300):
 # xhs WAF가 직접 URL 입력(/user/profile/<uid>)을 봇으로 차단함 (첫 진입은 free pass).
 # 사람처럼 [홈 → 검색 → 결과 클릭] 흐름으로 진입하면 URL에 xsec_token + xsec_source=pc_search
 # 자동으로 박혀서 정상 인증된 진입으로 처리됨.
-async def navigate_via_search(page, user_id, nickname):
-    """검색 박스 + Enter → 검색 결과 페이지에서 user 카드 href 추출 → goto. 반환: (success, msg).
+async def _input_search_keyword(page, keyword):
+    """홈 → 검색박스 click → keyboard.type(keyword) → Enter → 결과 페이지 도달.
 
-    흐름 (사용자 수동 검증):
-      검색박스 타이핑 → Enter → 검색 결과 페이지 → user 카드의 href 추출
-      → 현재 탭에서 page.goto (click은 새 탭 열어서 X)
+    creator(닉네임) / keyword(검색어) 양쪽 공통 헬퍼.
+    keyboard.type 패턴 필수 — xhs가 검색 박스 click 시 overlay 모달 띄우고
+    모달 input에 focus를 옮기는데, search_input.fill()은 stale 참조라 작동 X.
+    page.keyboard.type()은 현재 focused element에 입력 → 모달 input에 정확히 들어감.
 
-    핵심: click 대신 href 추출 + goto — xhs link가 target="_blank"라서
-    click 시 새 탭 열림 → 원래 탭은 search_result에 머무름 → 추출 실패.
+    반환: (success, msg)
     """
     # 1. 홈 진입
     home_ok = False
@@ -523,12 +523,7 @@ async def navigate_via_search(page, user_id, nickname):
     if not search_input:
         return False, "검색 박스 selector 못 찾음"
 
-    # 3. 검색 박스에 닉네임 입력 + Enter
-    # 패턴: click(활성화) → keyboard.type(focused element에 직접) → Enter
-    # 이유: xhs가 click 시 search overlay 모달 띄움 → 그 안에 NEW input이 focus 받음
-    #       search_input.fill()은 underlying header input을 가리키는 stale 참조라 작동 X
-    #       page.keyboard.type()은 현재 focused element에 입력 → overlay 모달 input에 들어감
-    # click 3단계 fallback — pointer event 차단 환경 대비
+    # 3. click(활성화) → 클리어 → keyboard.type → Enter
     try:
         try:
             await search_input.click(timeout=5000)
@@ -536,16 +531,13 @@ async def navigate_via_search(page, user_id, nickname):
             try:
                 await search_input.click(force=True, timeout=5000)
             except Exception:
-                # 마지막: JS focus
                 await search_input.evaluate("el => el.focus()")
-        await asyncio.sleep(0.5)  # overlay 모달 뜰 시간 확보
-        # Ctrl+A → Backspace로 기존 텍스트 클리어 (fill 대신)
+        await asyncio.sleep(0.5)  # overlay 모달 뜰 시간
         await page.keyboard.press("Control+A")
         await asyncio.sleep(0.1)
         await page.keyboard.press("Backspace")
         await asyncio.sleep(0.2)
-        # 키보드로 직접 타이핑 — focused element (overlay input)에 들어감
-        await page.keyboard.type(nickname, delay=50)
+        await page.keyboard.type(keyword, delay=50)
         await asyncio.sleep(0.3)
         await page.keyboard.press("Enter")
     except Exception as e:
@@ -553,6 +545,23 @@ async def navigate_via_search(page, user_id, nickname):
 
     # 4. 검색 결과 페이지 로딩 대기
     await asyncio.sleep(3)
+    return True, "OK"
+
+
+async def navigate_via_search(page, user_id, nickname):
+    """검색 박스 + Enter → 검색 결과 페이지에서 user 카드 href 추출 → goto. 반환: (success, msg).
+
+    흐름 (사용자 수동 검증):
+      검색박스 타이핑 → Enter → 검색 결과 페이지 → user 카드의 href 추출
+      → 현재 탭에서 page.goto (click은 새 탭 열어서 X)
+
+    핵심: click 대신 href 추출 + goto — xhs link가 target="_blank"라서
+    click 시 새 탭 열림 → 원래 탭은 search_result에 머무름 → 추출 실패.
+    """
+    # 1-4단계 (홈 진입 → 검색박스 입력 → 결과 페이지 도달) 공통 헬퍼로 분리
+    ok, msg = await _input_search_keyword(page, nickname)
+    if not ok:
+        return False, msg
 
     # 5. 검색 결과에서 user_id 정확 매칭 link 찾기 (동명이인 방지)
     user_link = page.locator(f"a[href*='/user/profile/{user_id}']").first
