@@ -126,7 +126,7 @@ python runners/grab_xhs.py --reset-session --detail-count 10
 ```
 
 #### 특정 주차 백필
-한 달 전 데이터부터 일주일씩 끊어서 백필. `--week` 지정 시 `--detail-count`는 자동으로 `-1`(전체).
+한 달 전 데이터부터 일주일씩 끊어서 백필. `--week` 지정 시 `--detail-count`는 자동으로 `10`.
 ```bash
 python runners/grab_xhs.py --reset-session --week 0420
 python runners/grab_xhs.py --reset-session --week 0427
@@ -182,7 +182,7 @@ python runners/grab_xhs_keyword.py 鞋 --reset-session --keep-open
 ```
 --reset-session       — user_data_dir + cookie 삭제 (QR 다시)
 --detail-count N      — 노트당 detail 진입 개수 (0=skip, -1=전체). 미지정 시 자동:
-                        지난주 자동 모드면 0, 특정 날짜 범위 지정 시 -1
+                        지난주 자동 모드면 0, 특정 날짜 범위 지정 시 10
 --no-images           — 이미지/영상 다운로드 OFF
 --week MMDD/YYMMDD    — 주차 명시 (기본: 지난주 자동)
 --date-start/end      — 임의 날짜 범위 (yyyy-mm-dd)
@@ -274,10 +274,10 @@ output/xhs_session_state.json          ← sessid + last_ip
 
 ```bash
 # dry-run 먼저
-python uploaders/s3_upload_xhs_post.py output/red-weekly-YYMMDD --dry-run
+python uploaders/s3_upload_xhs_post.py ../output/red-weekly-YYMMDD --dry-run
 
 # 실제 업로드
-python uploaders/s3_upload_xhs_post.py output/red-weekly-YYMMDD
+python uploaders/s3_upload_xhs_post.py ../output/red-weekly-YYMMDD
 ```
 
 업로드 경로:

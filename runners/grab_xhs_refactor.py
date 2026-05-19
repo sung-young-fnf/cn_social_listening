@@ -1527,13 +1527,13 @@ async def main():
         sys.exit(1)
     print(f"[date-filter] {date_label}")
 
-    # detail-count 자동 결정 — 특정 날짜 범위는 전체 detail (백필 시나리오), 지난주 자동은 0
+    # detail-count 자동 결정 — 특정 날짜 범위(백필)는 10개, 지난주 자동은 0
     # 사용자가 명시적으로 박은 값은 그대로 사용
     if args.detail_count is None:
         explicit_range = bool(args.week or args.date_start or args.date_end
                               or args.days or args.all)
-        args.detail_count = -1 if explicit_range else 0
-        mode = "전체(-1)" if args.detail_count == -1 else "목록만(0)"
+        args.detail_count = 10 if explicit_range else 0
+        mode = "10개 (백필)" if args.detail_count == 10 else "목록만(0)"
         print(f"[detail ] 자동 결정: {mode} "
               f"({'특정 날짜 범위' if explicit_range else '지난주 자동'})")
     else:
