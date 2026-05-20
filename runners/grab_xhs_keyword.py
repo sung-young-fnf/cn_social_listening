@@ -420,8 +420,9 @@ def parse_args():
     p.add_argument("keywords", nargs="?", default=None,
                    help="검색 키워드 (콤마로 여러 개). 미지정 시 xhs_config.py 전체 자동")
     p.add_argument("--reset-session", action="store_true")
-    p.add_argument("--detail-count", type=int, default=-1,
-                   help="노트당 detail 진입 개수 (0=skip, -1=전체, 기본 -1)")
+    p.add_argument("--detail-count", type=int, default=10,
+                   help="노트당 detail 진입 개수 (0=skip, -1=전체, 기본 10). "
+                        "-1은 키워드당 캡처된 모든 노트(보통 100~300개) detail 진입 — 운영 시간 매우 김")
     p.add_argument("--keep-open", action="store_true")
     p.add_argument("--no-images", action="store_true")
     p.add_argument("--image-concurrency", type=int, default=5)

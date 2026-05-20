@@ -159,7 +159,7 @@ python runners/grab_xhs_refactor.py 5a16311de8ac2b349577ec8e \
 
 특정 키워드 검색 결과 페이지에서 listener(`/search/notes`) 캡처. CREATOR 모드와 분리.
 - 검색박스 keyboard.type → 결과 페이지 → UI 클릭 정렬(`最热` + `一周内`)
-- 응답에 좋아요/댓글/이미지 다 들어있어서 detail은 옵션 (default `-1` = 전체)
+- 응답에 좋아요/댓글/이미지 다 들어있어서 detail은 옵션 (default `10`, `-1`은 전체 — 운영 시간 매우 김)
 - 출력: `output/red-keyword-YYMMDD/<keyword>/`
 
 ```bash
@@ -188,6 +188,8 @@ python runners/grab_xhs_keyword.py 鞋 --reset-session --keep-open
 --date-start/end      — 임의 날짜 범위 (yyyy-mm-dd)
 --days N              — 최근 N일
 --all                 — 날짜 필터 OFF
+--start-index N       — xhs_config.py user 리스트의 N번째부터 시작 (중간 실패 재개용,
+                        0-indexed. 예: --start-index 125 → 126번째부터)
 --batch-size N        — N명/배치 (기본 10)
 --batch-rest SEC      — 배치 휴식 초 (기본 600=10분)
 --gap-min/max SEC     — 계정 간 지터 (기본 4-7)
@@ -276,8 +278,12 @@ output/xhs_session_state.json          ← sessid + last_ip
 # dry-run 먼저
 python uploaders/s3_upload_xhs_post.py ../output/red-weekly-YYMMDD --dry-run
 
+python uploaders/s3_upload_xhs_account.py ../output/red-weekly-YYMMDD --dry-run
+
 # 실제 업로드
 python uploaders/s3_upload_xhs_post.py ../output/red-weekly-YYMMDD
+
+python uploaders/s3_upload_xhs_account.py ../output/red-weekly-YYMMDD
 ```
 
 업로드 경로:
