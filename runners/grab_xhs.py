@@ -1484,6 +1484,11 @@ def parse_args():
     p.add_argument("--days", type=int, default=0,
                    help="최근 N일 (예: 7 = 오늘 포함 최근 7일)")
 
+    # === 재개 (중간 실패 시 N번째부터 이어서 시작) ===
+    p.add_argument("--start-index", type=int, default=0,
+                   help="xhs_config.py user 리스트의 N번째부터 시작 (0-indexed). "
+                        "예: --start-index 125 → 126번째 인플루언서부터. 기본 0(처음부터)")
+
     # === 배치 + 지터 (xhs 봇 감지 회피) ===
     p.add_argument("--batch-size", type=int, default=10,
                    help="배치 당 계정 수 (기본 10)")
@@ -1537,8 +1542,19 @@ async def main():
         print(f"[FAIL] xhs_config.py에서 creator 매핑 못 받음.")
         print(f"       crawlers/mediacrawler-config/xhs_config.py의 '/user/profile/<uid>  # <nickname>' 주석 확인.")
         sys.exit(1)
-    user_ids = list(creator_map.keys())
-    print(f"[creator-map] xhs_config.py 전체 {len(user_ids)}명 운영 대상으로 로드")
+    full_user_ids = list(creator_map.keys())
+    total_full = len(full_user_ids)
+
+    # 재개 옵션 — --start-index N이면 N번째부터 시작
+    if args.start_index < 0 or args.start_index >= total_full:
+        print(f"[FAIL] --start-index {args.start_index} 범위 벗어남 (전체 {total_full}명, 0~{total_full-1})")
+        sys.exit(1)
+    user_ids = full_user_ids[args.start_index:]
+    if args.start_index > 0:
+        print(f"[creator-map] xhs_config.py 전체 {total_full}명 중 "
+              f"{args.start_index+1}번부터 {len(user_ids)}명 진행 (--start-index {args.start_index})")
+    else:
+        print(f"[creator-map] xhs_config.py 전체 {total_full}명 운영 대상으로 로드")
 
     # 날짜 범위 결정 (--all / --date-start/end / --week / --days / 기본=지난주)
     try:
