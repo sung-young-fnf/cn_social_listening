@@ -57,18 +57,20 @@ from grab_xhs import (  # noqa: E402
 
 
 # === 검색 결과 페이지 진입 + 정렬 ===
-# 사용자 확정 정렬 정책 (스크린샷 검증, 2026-05-18):
+# 사용자 확정 정렬 정책 (2026-05-21 갱신):
 #   排序依据: 最新 (최신순)
-#   发布时间: 不限 (전체) — default라 click 생략
+#   发布时间: 一周内 (일주일 안)
 # HTML 구조 (확정):
-#   선택 전: <div class="filter"><span>筛选</span><svg/></div>
-#   선택 후: <div class="filter active"><span>已筛选</span><svg class="...active"/></div>
+#   선택 전: <div class="filter"><span>筛选</span><svg/><div class="filter-panel">...</div></div>
+#   선택 후: <div class="filter active"><span>已筛选</span><svg class="...active"/>...</div>
+# 동작: trigger hover → 패널 자동 열림. mouse가 영역 벗어나면 닫힘.
 SORT_LABEL_NEW = "最新"
+SORT_LABEL_WEEK = "一周内"
 
 
 async def navigate_via_keyword(page, keyword):
-    """검색박스 keyboard.type → 결과 페이지 도달 → 정렬 UI 클릭(最新).
-    시간은 default 不限이라 별도 click 안 함. 반환: (success, msg).
+    """검색박스 keyboard.type → 결과 페이지 도달 → 정렬 UI hover + click(最新 + 一周内).
+    반환: (success, msg).
     """
     # 1-4단계: 홈 → 검색박스 → keyboard.type → Enter (creator와 공통)
     ok, msg = await _input_search_keyword(page, keyword)
@@ -81,13 +83,13 @@ async def navigate_via_keyword(page, keyword):
     except Exception:
         return False, f"검색 결과 URL 미전환 (현재: {page.url[:100]})"
 
-    # 6. 정렬 UI 클릭 — 排序(最新)
+    # 6. 정렬 UI 적용 — 排序(最新) + 时间(一周内)
     await asyncio.sleep(1)
     sort_applied = await _apply_sort_filter(page)
     if sort_applied:
         # 정렬 적용 후 응답 새로고침 대기
         await asyncio.sleep(2)
-        print(f"  · 정렬 적용: {SORT_LABEL_NEW} (시간은 default 不限)")
+        print(f"  · 정렬 적용: {SORT_LABEL_NEW} + {SORT_LABEL_WEEK}")
     else:
         print(f"  ⚠ 정렬 UI 적용 실패 — 기본 정렬(综合)로 진행")
 
@@ -95,18 +97,23 @@ async def navigate_via_keyword(page, keyword):
 
 
 async def _apply_sort_filter(page):
-    """筛选 트리거 click → 패널 열림 검증 → 最新 click → '已筛选' 검증.
+    """筛选 트리거 hover → 패널 자동 펼침 → 最新 click → '已筛选' 검증.
 
     HTML 구조 (스크린샷 확정):
-      선택 전: <div class="filter"><span>筛选</span>...</div>
-      선택 후: <div class="filter active"><span>已筛选</span>...</div>
+      <div class="filter">
+          <span>筛选</span>
+          <svg class="... [rotate]"/>     ← hover 시 rotate 추가
+          <div class="filter-panel">...</div>   ← 패널이 trigger의 자식
+      </div>
+
+    핵심: click이 아닌 **hover**로 패널이 열림.
+    mouse가 filter 영역 (트리거 또는 패널) 안에 있어야 패널 유지.
     """
-    # 1. 筛选 트리거 — div.filter 중 텍스트 "筛选" 포함하는 것 (정공법)
+    # 1. 筛选 트리거 — div.filter 중 텍스트 "筛选" 또는 "已筛选" 포함
     trigger = page.locator("div.filter").filter(has_text="筛选").first
     try:
         await trigger.wait_for(state="visible", timeout=5000)
     except Exception:
-        # 이미 선택된 상태(已筛选)이거나 selector 매칭 실패
         try:
             trigger = page.locator("div.filter").filter(has_text="已筛选").first
             await trigger.wait_for(state="visible", timeout=2000)
@@ -115,97 +122,104 @@ async def _apply_sort_filter(page):
             print(f"    ⚠ 筛选 트리거 못 찾음")
             return False
 
-    # 2. 트리거 click (3단계 fallback)
-    clicked = False
+    # 2. 트리거 hover — 패널 자동 열림 (click 아님)
+    hovered = False
     for try_method in (
-        lambda: trigger.click(timeout=3000),
-        lambda: trigger.click(force=True, timeout=3000),
-        lambda: trigger.evaluate("el => el.click()"),
+        lambda: trigger.hover(timeout=3000),
+        lambda: trigger.hover(force=True, timeout=3000),
     ):
         try:
             await try_method()
-            clicked = True
+            hovered = True
             break
         except Exception:
             continue
-    if not clicked:
-        print(f"    ⚠ 筛选 트리거 click 실패")
+    if not hovered:
+        print(f"    ⚠ 筛选 트리거 hover 실패")
         return False
 
-    # 3. 패널 열림 검증 — '排序依据' 헤더가 보이면 패널 열린 것
-    await asyncio.sleep(1.2)
+    # 3. 패널 열림 대기 + 검증 — .filter-panel이 visible이면 OK
+    await asyncio.sleep(1)
+    panel = trigger.locator(".filter-panel").first
     panel_open = False
     try:
-        cnt = await page.locator('text="排序依据"').count()
-        if cnt > 0:
-            panel_open = True
+        await panel.wait_for(state="visible", timeout=3000)
+        panel_open = True
     except Exception:
-        pass
-    if not panel_open:
-        # 한 번 더 트리거 click 시도 (force)
-        print(f"    · 패널 안 열림 — 재시도 (force click)")
+        # fallback: '排序依据' 헤더 매칭
         try:
-            await trigger.click(force=True, timeout=3000)
-            await asyncio.sleep(1.2)
             cnt = await page.locator('text="排序依据"').count()
             panel_open = cnt > 0
         except Exception:
             pass
     if not panel_open:
-        print(f"    ⚠ 패널 열기 실패 — 排序依据 헤더 못 찾음")
+        print(f"    ⚠ 패널 열기 실패 — .filter-panel/排序依据 못 찾음")
         return False
-    print(f"    · 패널 열림 OK (排序依据 헤더 감지)")
+    print(f"    · 패널 열림 OK")
 
-    # 4. 排序: 最新 click — 모든 visible 매칭을 차례로 시도 + 각 시도 후 '已筛选' 검증
-    # 페이지에 '最新' 텍스트가 여러 곳(상단 칩, 패널 옵션 등)에 있을 수 있음.
-    # first.click()이 잘못된 element를 잡으면 fail — visible 매칭 다 시도해서 진짜 옵션 찾기.
-    matches = page.get_by_text(SORT_LABEL_NEW, exact=True)
-    try:
-        match_count = await matches.count()
-    except Exception:
-        match_count = 0
-    print(f"    · '{SORT_LABEL_NEW}' 매칭 {match_count}개")
-    if match_count == 0:
-        print(f"    ⚠ '{SORT_LABEL_NEW}' 매칭 없음 — 패널 구조 변경 의심")
-        return False
-
-    applied = False
-    for i in range(match_count):
-        el = matches.nth(i)
+    # 4. 패널 안 옵션 click — 排序(最新) + 时间(一周内)
+    # panel 한 번 열고 두 옵션 차례로 mouse click. mouse는 매 click 후 그 옵션 위치
+    # (= trigger 자손 영역) 에 머무름 → panel 자동 유지. trigger.hover 재진입 불필요.
+    async def _click_option_once(label):
+        """패널 열린 상태에서 label 옵션 mouse click. 성공 True / 실패 False."""
+        option = panel.get_by_text(label, exact=True).first
         try:
-            visible = await el.is_visible()
+            await option.wait_for(state="visible", timeout=3000)
         except Exception:
-            visible = False
-        if not visible:
-            continue
-
-        # 3단계 fallback (일반 → force → JS)
-        clicked_i = False
-        for try_method in (
-            lambda e=el: e.click(timeout=2000),
-            lambda e=el: e.click(force=True, timeout=2000),
-            lambda e=el: e.evaluate("el => el.click()"),
-        ):
-            try:
-                await try_method()
-                clicked_i = True
-                break
-            except Exception:
-                continue
-        if not clicked_i:
-            continue
-
-        # 즉시 검증 — 트리거가 '已筛选'로 바뀌었는지
-        await asyncio.sleep(0.7)
+            return False
+        box = await option.bounding_box()
+        if not box or box["width"] < 1 or box["height"] < 1:
+            return False
+        cx = box["x"] + box["width"] / 2
+        cy = box["y"] + box["height"] / 2
         try:
-            applied = await page.locator("div.filter").filter(has_text="已筛选").count() > 0
-        except Exception:
-            applied = False
-        if applied:
-            print(f"    ✓ '{SORT_LABEL_NEW}' #{i} click 성공 — '已筛选' 검증 통과")
+            await page.mouse.move(cx, cy)
+            await asyncio.sleep(0.15)
+            await page.mouse.down()
+            await asyncio.sleep(0.08)
+            await page.mouse.up()
             return True
+        except Exception:
+            return False
 
-    print(f"    ⚠ '{SORT_LABEL_NEW}' click 모두 실패 또는 '已筛选' 미변경")
+    async def _verify_active(label):
+        """label 옵션 element 또는 ancestor에 active class 있는지 확인."""
+        try:
+            option = panel.get_by_text(label, exact=True).first
+            cls = await option.evaluate(
+                "el => { let cur = el; for (let i = 0; i < 3; i++) "
+                "{ if (cur.className && cur.className.includes('active')) return cur.className; "
+                "cur = cur.parentElement; if (!cur) break; } return ''; }"
+            )
+            return cls and "active" in cls
+        except Exception:
+            return False
+
+    # 두 옵션 차례로 click (panel은 유지된 상태)
+    if not await _click_option_once(SORT_LABEL_NEW):
+        print(f"    ⚠ '{SORT_LABEL_NEW}' click 실패")
+        return False
+    await asyncio.sleep(0.6)  # panel 안정화 + active class 적용 대기
+
+    if not await _click_option_once(SORT_LABEL_WEEK):
+        print(f"    ⚠ '{SORT_LABEL_WEEK}' click 실패")
+        return False
+    await asyncio.sleep(1)
+
+    # 5. 검증 — 두 옵션 모두 active 인지
+    new_active = await _verify_active(SORT_LABEL_NEW)
+    week_active = await _verify_active(SORT_LABEL_WEEK)
+
+    if new_active and week_active:
+        print(f"    ✓ 정렬 완료 — '{SORT_LABEL_NEW}' + '{SORT_LABEL_WEEK}' 둘 다 active")
+        return True
+    if new_active and not week_active:
+        print(f"    ⚠ '{SORT_LABEL_WEEK}' 미적용 — '{SORT_LABEL_NEW}'만 active")
+        return False
+    if not new_active and week_active:
+        print(f"    ⚠ '{SORT_LABEL_NEW}' 미적용 — '{SORT_LABEL_WEEK}'만 active")
+        return False
+    print(f"    ⚠ 둘 다 미적용 — click 효과 없음")
     return False
 
 
