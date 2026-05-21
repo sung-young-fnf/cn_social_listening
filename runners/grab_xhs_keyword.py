@@ -612,16 +612,17 @@ async def main():
                 os.makedirs(keyword_dir, exist_ok=True)
 
                 if not args.no_images:
+                    # 키워드 모드는 detail 진입한 노트만 이미지 다운로드 (cover fallback X).
+                    # 키워드 결과 N개 모두 cover 1장씩 받으면 데이터 폭증 (95 키워드 × 200장)
+                    # → detail 받은 노트만 풍부 이미지, 나머지는 notes.json의 cover URL만 보존.
                     total_saved, total_failed = 0, 0
                     for n in notes:
                         nid = n.get("noteId")
                         if not nid:
                             continue
                         img_urls = n.get("image_urls") or []
-                        if not img_urls and n.get("cover"):
-                            img_urls = [n["cover"]]
                         if not img_urls:
-                            continue
+                            continue  # detail 진입 안 한 노트는 skip (cover 다운로드 X)
                         note_dir = os.path.join(keyword_dir, nid)
                         saved, failed = await download_note_images(
                             page, note_dir, img_urls,
