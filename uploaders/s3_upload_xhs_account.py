@@ -17,7 +17,7 @@ import requests
 import urllib3
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -141,29 +141,45 @@ def build_parquet(creator, timestamp_str, image_path):
     else:
         tag_list_str = str(tag_list_raw) if tag_list_raw else ""
 
+    user_id = creator.get("user_id", "")
+    ip_location = creator.get("ip_location", "")
+    interaction_val = parse_chinese_number(creator.get("interaction", 0))
+
+    # 옛 키 alias 도 같이 박음 — STRG_SCL.RED_PROFILE External Table 가
+    # GET($1, 'rednote_id'/'ip_address'/'liked_collect_count') 로 매핑되어 있어
+    # 새 키만 박으면 PROFILE_ID/TOTAL_LIKE_CNT 가 NULL 로 들어감.
+    # 동일 값을 옛/새 두 컬럼에 중복 저장.
     data = {
-        "user_id": [creator.get("user_id", "")],
+        "profile_id": [user_id],   # CHN_MKT.DM_PROFILE_W 프로시저 JOIN 키 (= user_id)
+        "user_id": [user_id],
+        "rednote_id": [user_id],   # alias for External Table compatibility
         "nickname": [creator.get("nickname", "")],
         "gender": [gender_str],
         "desc": [creator.get("desc", "")],
-        "ip_location": [creator.get("ip_location", "")],
+        "ip_location": [ip_location],
+        "ip_address": [ip_location],   # alias
         "fans": [parse_chinese_number(creator.get("fans", 0))],
         "following": [parse_chinese_number(creator.get("follows", 0))],
-        "interaction": [parse_chinese_number(creator.get("interaction", 0))],
+        "interaction": [interaction_val],
+        "liked_collect_count": [interaction_val],   # alias
         "tag_list": [tag_list_str],
         "timestamp": [timestamp_str],
         "profile_image_path": [image_path],
     }
 
     schema = pa.schema([
+        ("profile_id", pa.string()),
         ("user_id", pa.string()),
+        ("rednote_id", pa.string()),
         ("nickname", pa.string()),
         ("gender", pa.string()),
         ("desc", pa.string()),
         ("ip_location", pa.string()),
+        ("ip_address", pa.string()),
         ("fans", pa.int64()),
         ("following", pa.int64()),
         ("interaction", pa.int64()),
+        ("liked_collect_count", pa.int64()),
         ("tag_list", pa.string()),
         ("timestamp", pa.string()),
         ("profile_image_path", pa.string()),
@@ -278,7 +294,12 @@ def main():
             continue
 
         # === 일반 모드 (DRY_RUN 또는 실제 업로드) ===
-        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # timestamp 는 적재 시각이 아니라 "데이터 주차의 운영 트리거 날짜(다음 월요일 06:00)"
+        # 로 박는다. SP_DM_PROFILE_W 가 WHERE TIMESTAMP::DATE BETWEEN v_start_dt AND v_end_dt
+        # 로 잡기 때문에, backfill 이든 운영이든 동일하게 v_end_dt = 트리거 월요일에 매칭됨.
+        _data_start = datetime(int(p_year), int(p_month), int(p_day))
+        _trigger = _data_start + timedelta(days=7)   # 데이터 주차 시작(월) + 7 = 다음 월요일
+        timestamp_str = _trigger.strftime("%Y-%m-%d 06:00:00")
 
         # S3 경로 — user_id 기준
         parquet_key = f"xiaohongshu/account/p_year={p_year}/p_month={p_month}/p_day={p_day}/p_keyword={user_id}/{user_id}.parquet"

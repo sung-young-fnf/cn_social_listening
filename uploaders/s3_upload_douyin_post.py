@@ -44,14 +44,28 @@ def parse_args():
 
 
 def parse_date_from_dirname(data_dir):
-    """폴더명에서 주차 시작일 추출 (douyin-weekly-MMDD-vN → year, month, day)"""
+    """폴더명에서 주차 시작일 추출.
+
+    지원 패턴:
+    - YYMMDD 6자리 (예: `douyin-weekly-260511-v5`, `_douyin_local_260511`) ← 우선
+    - MMDD 4자리  (예: `douyin-weekly-0511-v5`) — 레거시, year=2026 가정
+    """
     dir_name = os.path.basename(data_dir)
-    match = re.search(r"(\d{4})", dir_name)
-    if not match:
-        print(f"오류: 폴더명에서 날짜를 추출할 수 없습니다 — {dir_name}")
-        sys.exit(1)
-    date_part = match.group(1)
-    return "2026", date_part[:2], date_part[2:]
+
+    # 6자리 YYMMDD 먼저 매칭 — 다른 숫자(4자리 v버전 등)와 안 겹치게 word boundary
+    m6 = re.search(r"(?<!\d)(\d{6})(?!\d)", dir_name)
+    if m6:
+        s = m6.group(1)
+        return "20" + s[:2], s[2:4], s[4:6]
+
+    # 4자리 MMDD fallback (year 고정 2026 — 레거시)
+    m4 = re.search(r"(?<!\d)(\d{4})(?!\d)", dir_name)
+    if m4:
+        s = m4.group(1)
+        return "2026", s[:2], s[2:]
+
+    print(f"오류: 폴더명에서 날짜를 추출할 수 없습니다 — {dir_name}")
+    sys.exit(1)
 
 
 
