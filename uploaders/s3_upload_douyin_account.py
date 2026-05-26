@@ -16,7 +16,7 @@ import re
 import requests
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -46,14 +46,26 @@ def parse_args():
 
 
 def parse_date_from_dirname(data_dir):
-    """폴더명에서 주차 시작일 추출 (douyin-weekly-MMDD-vN → year, month, day)"""
+    """폴더명에서 주차 시작일 추출.
+
+    지원 패턴:
+    - YYMMDD 6자리 (예: `douyin-weekly-260511-v5`, `_douyin_local_260511`) ← 우선
+    - MMDD 4자리  (예: `douyin-weekly-0511-v5`) — 레거시, year=2026 가정
+    """
     dir_name = os.path.basename(data_dir)
-    match = re.search(r"(\d{4})", dir_name)
-    if not match:
-        print(f"오류: 폴더명에서 날짜를 추출할 수 없습니다 — {dir_name}")
-        sys.exit(1)
-    date_part = match.group(1)
-    return "2026", date_part[:2], date_part[2:]
+
+    m6 = re.search(r"(?<!\d)(\d{6})(?!\d)", dir_name)
+    if m6:
+        s = m6.group(1)
+        return "20" + s[:2], s[2:4], s[4:6]
+
+    m4 = re.search(r"(?<!\d)(\d{4})(?!\d)", dir_name)
+    if m4:
+        s = m4.group(1)
+        return "2026", s[:2], s[2:]
+
+    print(f"오류: 폴더명에서 날짜를 추출할 수 없습니다 — {dir_name}")
+    sys.exit(1)
 
 
 def load_secuid_map():
@@ -82,11 +94,11 @@ def upload_file(s3_key, data):
     resp.raise_for_status()
 
 
-def build_parquet(profile, collected_at, image_path, sec_uid):
-    """data.json의 profile을 S3 parquet 스키마로 변환 (10컬럼)"""
-    ts = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
-    timestamp_str = ts.strftime("%Y-%m-%d %H:%M:%S")
-
+def build_parquet(profile, timestamp_str, image_path, sec_uid):
+    """data.json의 profile을 S3 parquet 스키마로 변환 (10컬럼).
+    timestamp_str 은 caller(main)가 "데이터 주차의 운영 트리거 날짜(다음 월요일 06:00)"
+    형식으로 만들어서 넘김 — SP_DM_PROFILE_W 윈도우와 매칭되도록.
+    """
     data = {
         "nickname": [profile.get("nickname", "")],
         "douyin_id": [profile.get("uniqueId", "")],
@@ -165,9 +177,13 @@ def main():
             data = json.load(f)
 
         profile = data.get("profile", {})
-        collected_at = data.get("collectedAt", "")
         avatar_url = profile.get("avatarUrl", "")
         sec_uid = secuid_map.get(folder, "")
+
+        # timestamp 는 데이터 주차의 운영 트리거 날짜(다음 월요일 06:00) — SP_DM_PROFILE_W 윈도우와 매칭
+        _data_start = datetime(int(p_year), int(p_month), int(p_day))
+        _trigger = _data_start + timedelta(days=7)
+        timestamp_str = _trigger.strftime("%Y-%m-%d 06:00:00")
 
         # S3 경로
         parquet_key = f"douyin/account/p_year={p_year}/p_month={p_month}/p_day={p_day}/p_keyword={folder}/{folder}.parquet"
@@ -191,7 +207,7 @@ def main():
                 image_key = ""
 
             # 2. Parquet 업로드
-            parquet_data = build_parquet(profile, collected_at, image_key, sec_uid)
+            parquet_data = build_parquet(profile, timestamp_str, image_key, sec_uid)
             if DRY_RUN:
                 print(f"    [DRY] parquet → {parquet_key} ({len(parquet_data):,} bytes)")
             else:

@@ -17,7 +17,7 @@ import requests
 import urllib3
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -294,7 +294,12 @@ def main():
             continue
 
         # === 일반 모드 (DRY_RUN 또는 실제 업로드) ===
-        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # timestamp 는 적재 시각이 아니라 "데이터 주차의 운영 트리거 날짜(다음 월요일 06:00)"
+        # 로 박는다. SP_DM_PROFILE_W 가 WHERE TIMESTAMP::DATE BETWEEN v_start_dt AND v_end_dt
+        # 로 잡기 때문에, backfill 이든 운영이든 동일하게 v_end_dt = 트리거 월요일에 매칭됨.
+        _data_start = datetime(int(p_year), int(p_month), int(p_day))
+        _trigger = _data_start + timedelta(days=7)   # 데이터 주차 시작(월) + 7 = 다음 월요일
+        timestamp_str = _trigger.strftime("%Y-%m-%d 06:00:00")
 
         # S3 경로 — user_id 기준
         parquet_key = f"xiaohongshu/account/p_year={p_year}/p_month={p_month}/p_day={p_day}/p_keyword={user_id}/{user_id}.parquet"
