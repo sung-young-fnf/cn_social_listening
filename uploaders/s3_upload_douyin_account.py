@@ -180,10 +180,10 @@ def main():
         avatar_url = profile.get("avatarUrl", "")
         sec_uid = secuid_map.get(folder, "")
 
-        # timestamp 는 데이터 주차의 운영 트리거 날짜(다음 월요일 06:00) — SP_DM_PROFILE_W 윈도우와 매칭
-        _data_start = datetime(int(p_year), int(p_month), int(p_day))
-        _trigger = _data_start + timedelta(days=7)
-        timestamp_str = _trigger.strftime("%Y-%m-%d 06:00:00")
+        # timestamp 는 "그 주차 마지막 일요일 12:00" — 운영 Airflow 의 END_DT=Sun 패턴과 일치
+        _data_start = datetime(int(p_year), int(p_month), int(p_day))   # 그 주차 월요일
+        _data_end = _data_start + timedelta(days=6)                      # 그 주차 일요일
+        timestamp_str = _data_end.strftime("%Y-%m-%d 12:00:00")
 
         # S3 경로
         parquet_key = f"douyin/account/p_year={p_year}/p_month={p_month}/p_day={p_day}/p_keyword={folder}/{folder}.parquet"

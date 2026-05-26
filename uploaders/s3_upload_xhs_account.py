@@ -294,12 +294,13 @@ def main():
             continue
 
         # === 일반 모드 (DRY_RUN 또는 실제 업로드) ===
-        # timestamp 는 적재 시각이 아니라 "데이터 주차의 운영 트리거 날짜(다음 월요일 06:00)"
-        # 로 박는다. SP_DM_PROFILE_W 가 WHERE TIMESTAMP::DATE BETWEEN v_start_dt AND v_end_dt
-        # 로 잡기 때문에, backfill 이든 운영이든 동일하게 v_end_dt = 트리거 월요일에 매칭됨.
-        _data_start = datetime(int(p_year), int(p_month), int(p_day))
-        _trigger = _data_start + timedelta(days=7)   # 데이터 주차 시작(월) + 7 = 다음 월요일
-        timestamp_str = _trigger.strftime("%Y-%m-%d 06:00:00")
+        # timestamp 는 "그 주차 마지막 일요일 12:00" 으로 박는다.
+        # 운영 Airflow 가 UTC 일요일 21:00 트리거 → CURRENT_DATE()=일요일 → END_DT=Sun.
+        # backfill 도 동일하게 END_DT=Sun, START_DT=Mon 으로 박히도록.
+        # SP_DM_PROFILE_W('YYYY-MM-DD' = 그 주차 일요일) 으로 호출하면 윈도우 매칭.
+        _data_start = datetime(int(p_year), int(p_month), int(p_day))   # 그 주차 월요일
+        _data_end = _data_start + timedelta(days=6)                      # 그 주차 일요일
+        timestamp_str = _data_end.strftime("%Y-%m-%d 12:00:00")
 
         # S3 경로 — user_id 기준
         parquet_key = f"xiaohongshu/account/p_year={p_year}/p_month={p_month}/p_day={p_day}/p_keyword={user_id}/{user_id}.parquet"
