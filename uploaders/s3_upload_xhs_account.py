@@ -141,29 +141,45 @@ def build_parquet(creator, timestamp_str, image_path):
     else:
         tag_list_str = str(tag_list_raw) if tag_list_raw else ""
 
+    user_id = creator.get("user_id", "")
+    ip_location = creator.get("ip_location", "")
+    interaction_val = parse_chinese_number(creator.get("interaction", 0))
+
+    # 옛 키 alias 도 같이 박음 — STRG_SCL.RED_PROFILE External Table 가
+    # GET($1, 'rednote_id'/'ip_address'/'liked_collect_count') 로 매핑되어 있어
+    # 새 키만 박으면 PROFILE_ID/TOTAL_LIKE_CNT 가 NULL 로 들어감.
+    # 동일 값을 옛/새 두 컬럼에 중복 저장.
     data = {
-        "user_id": [creator.get("user_id", "")],
+        "profile_id": [user_id],   # CHN_MKT.DM_PROFILE_W 프로시저 JOIN 키 (= user_id)
+        "user_id": [user_id],
+        "rednote_id": [user_id],   # alias for External Table compatibility
         "nickname": [creator.get("nickname", "")],
         "gender": [gender_str],
         "desc": [creator.get("desc", "")],
-        "ip_location": [creator.get("ip_location", "")],
+        "ip_location": [ip_location],
+        "ip_address": [ip_location],   # alias
         "fans": [parse_chinese_number(creator.get("fans", 0))],
         "following": [parse_chinese_number(creator.get("follows", 0))],
-        "interaction": [parse_chinese_number(creator.get("interaction", 0))],
+        "interaction": [interaction_val],
+        "liked_collect_count": [interaction_val],   # alias
         "tag_list": [tag_list_str],
         "timestamp": [timestamp_str],
         "profile_image_path": [image_path],
     }
 
     schema = pa.schema([
+        ("profile_id", pa.string()),
         ("user_id", pa.string()),
+        ("rednote_id", pa.string()),
         ("nickname", pa.string()),
         ("gender", pa.string()),
         ("desc", pa.string()),
         ("ip_location", pa.string()),
+        ("ip_address", pa.string()),
         ("fans", pa.int64()),
         ("following", pa.int64()),
         ("interaction", pa.int64()),
+        ("liked_collect_count", pa.int64()),
         ("tag_list", pa.string()),
         ("timestamp", pa.string()),
         ("profile_image_path", pa.string()),
