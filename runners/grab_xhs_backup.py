@@ -102,7 +102,7 @@ def load_xhs_creator_map(config_path=None):
     if config_path is None:
         config_path = os.path.abspath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "..", "data", "xhs_config.py"
+            "..", "data", "xhs_config_test.py"
         ))
     if not os.path.isfile(config_path):
         print(f"[creator-map] 파일 없음 — {config_path}")
@@ -599,72 +599,12 @@ async def _click_user_tab(page):
     return False
 
 
-# === 安全验证 captcha 모달 닫기 (검색 직후 떠서 탭 클릭 막는 케이스) ===
-async def _dismiss_captcha_modal(page):
-    """검색 결과에 뜨는 '安全验证(请勿频繁操作)' captcha 모달을 X 버튼으로 닫는다.
-
-    모달 없으면 False, 닫았으면 True.
-
-    실제 DOM (사용자 F12 확정, 2026-06-30):
-      <div class="captcha-modal-content">
-        <div class="captcha-modal__header">
-          <div class="captcha-modal-title">安全验证</div>
-          <div class="captcha-modal__close" title="关闭"><svg.../></div>
-    close 버튼이 svg 든 평범한 div라 _click_user_tab과 동일하게
-    bounding_box 중심 좌표 mouse click으로 actionability 우회.
-    """
-    close_btn = page.locator("div.captcha-modal__close").first
-    try:
-        await close_btn.wait_for(state="visible", timeout=2000)
-    except Exception:
-        return False  # 모달 없음 — 정상
-
-    print(f"     · ⚠ 安全验证 captcha 모달 감지 → X 버튼으로 닫기")
-
-    # 1. 좌표 기반 mouse click (svg 든 div — actionability 우회)
-    try:
-        box = await close_btn.bounding_box()
-        if box and box["width"] >= 1 and box["height"] >= 1:
-            cx = box["x"] + box["width"] / 2
-            cy = box["y"] + box["height"] / 2
-            await page.mouse.move(cx, cy)
-            await asyncio.sleep(0.15)
-            await page.mouse.down()
-            await asyncio.sleep(0.08)
-            await page.mouse.up()
-            await asyncio.sleep(0.8)
-            return True
-    except Exception:
-        pass
-
-    # 2. fallback — 일반 click (force 포함)
-    for method in (
-        lambda: close_btn.click(timeout=3000),
-        lambda: close_btn.click(force=True, timeout=3000),
-    ):
-        try:
-            await method()
-            await asyncio.sleep(0.8)
-            return True
-        except Exception:
-            continue
-
-    print(f"     · [diag] captcha 모달 X 버튼 클릭 실패")
-    return False
-
-
 async def navigate_via_search(page, user_id, nickname):
-    """검색 박스 + Enter → [用户] 탭 클릭 → user 카드 href 추출 → goto. 반환: (success, msg).
+    """검색 박스 + Enter → 검색 결과 페이지에서 user 카드 href 추출 → goto. 반환: (success, msg).
 
-    흐름 (2026-06-30 봇 감지 강화 대응):
-      검색박스 타이핑 → Enter → 검색 결과 페이지
-      → ★ 무조건 [用户] 탭 클릭 → 사용자 목록에서 user_id 매칭 카드 href 추출
+    흐름 (사용자 수동 검증):
+      검색박스 타이핑 → Enter → 검색 결과 페이지 → user 카드의 href 추출
       → 현재 탭에서 page.goto (click은 새 탭 열어서 X)
-
-    핵심 변경 (2026-06-30): 봇 감지가 심해져서 검색 직후 全部 탭에 프로필 카드가
-    안 뜨고 '安全验证(请勿频繁操作)' 모달 + '没找到相关内容'만 나오는 케이스가
-    많아짐. [用户] 탭을 클릭하면 해당 계정이 정상적으로 노출됨(사용자 F12 확인).
-    → 全部 탭 우선 매칭은 폐기하고 항상 [用户] 탭 경유로 진입.
 
     핵심: click 대신 href 추출 + goto — xhs link가 target="_blank"라서
     click 시 새 탭 열림 → 원래 탭은 search_result에 머무름 → 추출 실패.
@@ -674,42 +614,22 @@ async def navigate_via_search(page, user_id, nickname):
     if not ok:
         return False, msg
 
-    # 5. ★ 봇 감지 강화(2026-06-30)로 全部 탭에 카드가 안 뜨는 케이스가 많아짐.
-    #    → 全部 탭 우선 매칭은 주석 처리하고, 항상 [用户] 탭을 먼저 클릭한 뒤
-    #      사용자 목록에서 user_id 매칭 카드를 찾는다.
-    # --- (기존 全部 탭 우선 매칭 — 주석 처리) ---
-    # user_link = page.locator(f"a[href*='/user/profile/{user_id}']").first
-    # try:
-    #     await user_link.wait_for(state="visible", timeout=5000)
-    # except Exception:
-    #     # 全部 탭에 프로필 카드 없음 (HOKA 등 브랜드는 笔记만 뜸)
-    #     # → [用户] 탭 클릭 후 사용자 목록에서 재탐색. 그래도 없으면 SKIP.
-    #     print(f"     · 全部 탭에 프로필 카드 없음 → [用户] 탭 클릭 후 재탐색")
-    #     if not await _click_user_tab(page):
-    #         return False, f"검색 결과에 user_id={user_id[:10]}... 없음 (用户 탭 클릭 실패)"
-    #     await asyncio.sleep(2.5)  # 用户 목록 로딩 대기
-    #     user_link = page.locator(f"a[href*='/user/profile/{user_id}']").first
-    #     try:
-    #         await user_link.wait_for(state="visible", timeout=6000)
-    #     except Exception:
-    #         return False, f"검색 결과에 user_id={user_id[:10]}... 없음 (全部+用户)"
-
-    # 5. 무조건 [用户] 탭 클릭 후 사용자 목록에서 user_id 매칭 카드 탐색
-    # ★ 검색 직후 '安全验证(请勿频繁操作)' captcha 모달이 떠서 탭 클릭을 막는 경우가 있음
-    #   (2026-06-30 확인). → 모달이 있으면 먼저 X로 닫고 [用户] 탭을 클릭한다.
-    await _dismiss_captcha_modal(page)
-    print(f"     · [用户] 탭 클릭 후 사용자 목록에서 탐색")
-    if not await _click_user_tab(page):
-        # 탭 클릭 실패 — 모달이 (다시) 떠있을 수 있음. 한 번 더 닫고 재시도.
-        await _dismiss_captcha_modal(page)
-        if not await _click_user_tab(page):
-            return False, f"검색 결과에서 [用户] 탭 클릭 실패 (user_id={user_id[:10]}...)"
-    await asyncio.sleep(2.5)  # 用户 목록 로딩 대기
+    # 5. 검색 결과에서 user_id 정확 매칭 link 찾기 (동명이인 방지)
     user_link = page.locator(f"a[href*='/user/profile/{user_id}']").first
     try:
-        await user_link.wait_for(state="visible", timeout=6000)
+        await user_link.wait_for(state="visible", timeout=5000)
     except Exception:
-        return False, f"검색 결과에 user_id={user_id[:10]}... 없음 (用户 탭)"
+        # 全部 탭에 프로필 카드 없음 (HOKA 등 브랜드는 笔记만 뜸)
+        # → [用户] 탭 클릭 후 사용자 목록에서 재탐색. 그래도 없으면 SKIP.
+        print(f"     · 全部 탭에 프로필 카드 없음 → [用户] 탭 클릭 후 재탐색")
+        if not await _click_user_tab(page):
+            return False, f"검색 결과에 user_id={user_id[:10]}... 없음 (用户 탭 클릭 실패)"
+        await asyncio.sleep(2.5)  # 用户 목록 로딩 대기
+        user_link = page.locator(f"a[href*='/user/profile/{user_id}']").first
+        try:
+            await user_link.wait_for(state="visible", timeout=6000)
+        except Exception:
+            return False, f"검색 결과에 user_id={user_id[:10]}... 없음 (全部+用户)"
 
     # 6. href 추출 → 현재 탭에서 navigate
     # 클릭하면 target="_blank"라 새 탭 열려서 우리 page 변수가 못 따라감 → href + goto

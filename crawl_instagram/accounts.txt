@@ -1,0 +1,7 @@
+# 인스타그램 크롤링 대상 — 한 줄에 하나.
+# 형식: 프로필 URL 그대로 붙여넣거나 username만 적어도 됨.
+#   https://www.instagram.com/your.clothes___/
+#   your.clothes___
+# '#'로 시작하는 줄과 빈 줄은 무시.
+
+https://www.instagram.com/your.clothes___/
