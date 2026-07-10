@@ -74,6 +74,9 @@ COLUMNS = [
     "SELLER_NAME", "SELLER_CEO", "SELLER_BIZ_NO", "SELLER_MAILORDER_NO",
     "SELLER_TEL", "SELLER_EMAIL", "SELLER_ADDRESS",
     "DETAIL_IMAGES",
+    # === 상품 고시 정보안내 (/api2/goods/{no}/essential) ===
+    "NOTICE_MATERIAL", "NOTICE_COLOR", "NOTICE_SIZE", "NOTICE_MAKER",
+    "NOTICE_ORIGIN", "NOTICE_CARE", "NOTICE_WARRANTY", "NOTICE_AS",
 ]
 
 # VALUE 컬럼: 상품 raw 데이터를 {c1..cN} JSON으로 저장.
@@ -313,7 +316,35 @@ EXTRA_COLUMNS = [
     "TAGS", "MATERIAL", "SELLER_NAME", "SELLER_CEO", "SELLER_BIZ_NO",
     "SELLER_MAILORDER_NO", "SELLER_TEL", "SELLER_EMAIL", "SELLER_ADDRESS",
     "DETAIL_IMAGES",
+    "NOTICE_MATERIAL", "NOTICE_COLOR", "NOTICE_SIZE", "NOTICE_MAKER",
+    "NOTICE_ORIGIN", "NOTICE_CARE", "NOTICE_WARRANTY", "NOTICE_AS",
 ]
+
+
+def _map_essentials(essentials):
+    """/essential 의 name/value 배열 → NOTICE_* 컬럼 매핑. 이름 변형(∙ 등) 관대 매칭.
+    상품 고시 정보안내: 제품소재/색상/치수/제조사/제조국/세탁·취급주의/품질보증/AS."""
+    out = {}
+    for e in essentials or []:
+        name = e.get("name", "") or ""
+        val = e.get("value", "") or ""
+        if "소재" in name:
+            out["NOTICE_MATERIAL"] = val
+        elif "색상" in name:
+            out["NOTICE_COLOR"] = val
+        elif "치수" in name:
+            out["NOTICE_SIZE"] = val
+        elif "제조국" in name:          # '제조사'보다 먼저 검사 (둘 다 '제조' 포함)
+            out["NOTICE_ORIGIN"] = val
+        elif "제조사" in name:
+            out["NOTICE_MAKER"] = val
+        elif "취급" in name or "세탁" in name:
+            out["NOTICE_CARE"] = val
+        elif "품질보증" in name:
+            out["NOTICE_WARRANTY"] = val
+        elif "A/S" in name or "책임자" in name:
+            out["NOTICE_AS"] = val
+    return out
 
 
 def _parse_material(goods_material):
@@ -357,6 +388,15 @@ def fetch_goods_extra(sess, no, hdr, proxies):
         if tr.status_code == 200:
             tags = ((tr.json().get("data") or {}).get("tags")) or []
             out["TAGS"] = " ".join(f"#{t}" for t in tags if t)
+    except Exception:
+        pass
+    # 3) essential → 상품 고시 정보안내 (제품소재/색상/제조국/세탁/품질보증/AS)
+    try:
+        er = sess.get(f"https://goods-detail.musinsa.com/api2/goods/{no}/essential",
+                      headers=hdr, proxies=proxies, timeout=20)
+        if er.status_code == 200:
+            essentials = ((er.json().get("data") or {}).get("essentials")) or []
+            out.update(_map_essentials(essentials))
     except Exception:
         pass
     return out
