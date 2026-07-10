@@ -69,6 +69,11 @@ COLUMNS = [
     "PRICE", "DISCOUNT_PRICE", "DISCOUNT_COUPON_VALUE",
     "REVIEW_COUNT", "LIKE_COUNT", "VIEW_COUNT", "SELL_COUNT",
     "IMAGE_URL", "PRODUCT_NO",
+    # === 상세 base API 확장 (goods-detail.musinsa.com/api2/goods/{no} + /tags) ===
+    "TAGS", "MATERIAL",
+    "SELLER_NAME", "SELLER_CEO", "SELLER_BIZ_NO", "SELLER_MAILORDER_NO",
+    "SELLER_TEL", "SELLER_EMAIL", "SELLER_ADDRESS",
+    "DETAIL_IMAGES",
 ]
 
 # VALUE 컬럼: 상품 raw 데이터를 {c1..cN} JSON으로 저장.
@@ -296,6 +301,67 @@ def _parse_next_data(html):
     return out
 
 
+# === 상세 base API 확장 필드 (연관태그·소재·판매자고시·상세이미지) ===
+# goods-detail.musinsa.com/api2/goods/{no}      → company/goodsMaterial/goodsContents
+# goods-detail.musinsa.com/api2/goods/{no}/tags → 연관 태그(data.tags)
+# 주의: 색상/제조사/제조국/치수 등 "상품 고시 정보안내" 상단 값은 판매자 이미지에
+#       박혀있어(goodsContents) 구조화 추출 불가 — 이미지 URL만 DETAIL_IMAGES로 수집.
+_IMG_SRC_RE = re.compile(r'src=["\']([^"\']+)["\']', re.I)
+
+# enrich 로 채우는 확장 컬럼 (빈 값 기본). build_row 는 몰라도 되고 여기서 in-place 주입.
+EXTRA_COLUMNS = [
+    "TAGS", "MATERIAL", "SELLER_NAME", "SELLER_CEO", "SELLER_BIZ_NO",
+    "SELLER_MAILORDER_NO", "SELLER_TEL", "SELLER_EMAIL", "SELLER_ADDRESS",
+    "DETAIL_IMAGES",
+]
+
+
+def _parse_material(goods_material):
+    """goodsMaterial.materials 의 부위별 isSelected=true 속성만 요약.
+    예: '핏:오버/사이즈 | 촉감:보통 | 계절:봄/여름/가을/겨울'."""
+    parts = []
+    for part in (goods_material or {}).get("materials", []) or []:
+        sel = [i.get("name", "") for i in part.get("items", []) if i.get("isSelected")]
+        if sel:
+            parts.append(f"{part.get('name', '')}:{'/'.join(sel)}")
+    return " | ".join(parts)
+
+
+def fetch_goods_extra(sess, no, hdr, proxies):
+    """base goods API + tags 로 연관태그·소재·판매자고시·상세이미지 수집 → dict.
+    실패해도 빈 dict 유지 (부분 실패 허용)."""
+    out = {c: "" for c in EXTRA_COLUMNS}
+    # 1) base goods → company/material/contents
+    try:
+        gr = sess.get(f"https://goods-detail.musinsa.com/api2/goods/{no}",
+                      headers=hdr, proxies=proxies, timeout=30)
+        if gr.status_code == 200:
+            d = gr.json().get("data") or {}
+            c = d.get("company") or {}
+            out["SELLER_NAME"] = c.get("name", "")
+            out["SELLER_CEO"] = c.get("ceoName", "")
+            out["SELLER_BIZ_NO"] = c.get("businessNumber", "")
+            out["SELLER_MAILORDER_NO"] = c.get("mailOrderReportNumber", "")
+            out["SELLER_TEL"] = c.get("phoneNumber", "")
+            out["SELLER_EMAIL"] = c.get("email", "")
+            out["SELLER_ADDRESS"] = " ".join(
+                x for x in [c.get("address", ""), c.get("detailAddress", "")] if x)
+            out["MATERIAL"] = _parse_material(d.get("goodsMaterial"))
+            out["DETAIL_IMAGES"] = "|".join(_IMG_SRC_RE.findall(d.get("goodsContents") or ""))
+    except Exception:
+        pass
+    # 2) tags → 연관 태그
+    try:
+        tr = sess.get(f"https://goods-detail.musinsa.com/api2/goods/{no}/tags",
+                      headers=hdr, proxies=proxies, timeout=20)
+        if tr.status_code == 200:
+            tags = ((tr.json().get("data") or {}).get("tags")) or []
+            out["TAGS"] = " ".join(f"#{t}" for t in tags if t)
+    except Exception:
+        pass
+    return out
+
+
 def enrich_details_http(rows, proxies, delay, limit):
     """각 row 의 PRODUCT_NO 에 대해 상세 __NEXT_DATA__(카테고리/시즌) + stat API
     (조회수/판매수 원본값) 를 HTTP 로 받아 채운다 (in-place). 브라우저 없음.
@@ -350,6 +416,14 @@ def enrich_details_http(rows, proxies, delay, limit):
                     print(f"  [{idx}/{total}] {no} stat status={sr.status_code}")
             except Exception as e:
                 print(f"  [{idx}/{total}] {no} stat 실패: {str(e)[:50]}")
+            # 3) base goods + tags → 연관태그/소재/판매자고시/상세이미지
+            try:
+                extra = fetch_goods_extra(sess, no, hdr, proxies)
+                row.update(extra)
+                if any(extra.values()):
+                    succeeded = True
+            except Exception as e:
+                print(f"  [{idx}/{total}] {no} extra 실패: {str(e)[:50]}")
 
             if succeeded:
                 ok += 1
