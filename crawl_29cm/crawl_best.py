@@ -62,8 +62,11 @@ HEADERS = {
 
 CATEGORY_GROUPS_URL = "https://recommend-api.29cm.co.kr/api/v4/best/category-groups"
 BEST_ITEMS_URL = "https://display-bff-api.29cm.co.kr/api/v1/plp/best/items"
+# 상품 상세 (상품정보: 제품 주소재/색상/치수 = data.itemDetailsList)
+PRODUCT_DETAIL_URL = "https://bff-api.29cm.co.kr/api/v5/product-detail/{no}"
+PRODUCT_PAGE_URL = "https://www.29cm.co.kr/products/{no}"
 
-# 운영 schema (23컬럼) — 무신사와 동일.
+# 운영 schema — 무신사 확장과 동일 (상품정보 3필드 + 상품주소).
 COLUMNS = [
     "VALUE", "YEAR", "MONTH", "DAY",
     "MAIN_CATEGORY", "MID_CATEGORY", "SUB_CATEGORY",
@@ -72,6 +75,9 @@ COLUMNS = [
     "PRICE", "DISCOUNT_PRICE", "DISCOUNT_COUPON_VALUE",
     "REVIEW_COUNT", "LIKE_COUNT", "VIEW_COUNT", "SELL_COUNT",
     "IMAGE_URL", "PRODUCT_NO",
+    # === 상품 상세(product-detail API) 확장 ===
+    "NOTICE_MATERIAL", "NOTICE_COLOR", "NOTICE_SIZE",
+    "PRODUCT_URL",   # 상품 상세 페이지 주소 (PRODUCT_NO 로 생성)
 ]
 # VALUE 컬럼: 데이터 컬럼(c1..c19)을 JSON으로 저장 (VALUE/YEAR/MONTH/DAY 제외).
 VALUE_KEY_COLUMNS = COLUMNS[4:]
@@ -200,7 +206,50 @@ def build_row(item, rank, gender_filter, ymd):
         "SELL_COUNT": "",                                  # API 미제공
         "IMAGE_URL": info.get("thumbnailUrl", ""),
         "PRODUCT_NO": item_id,
+        # 상세 보강 전 기본값 (enrich_details 에서 채움)
+        "NOTICE_MATERIAL": "", "NOTICE_COLOR": "", "NOTICE_SIZE": "",
+        "PRODUCT_URL": PRODUCT_PAGE_URL.format(no=item_id) if item_id else "",
     }
+
+
+def _map_item_details(item_details_list):
+    """product-detail 의 itemDetailsList → 상품정보 3필드 매핑.
+    제목 변형(제품 주소재/제품 소재) 관대 매칭. 값이 '상세 페이지 참고'면 그대로 저장."""
+    out = {"NOTICE_MATERIAL": "", "NOTICE_COLOR": "", "NOTICE_SIZE": ""}
+    for it in item_details_list or []:
+        title = it.get("itemDetailsTitles", "") or ""
+        value = it.get("itemDetailsValue", "") or ""
+        if "소재" in title:
+            out["NOTICE_MATERIAL"] = value
+        elif "색상" in title:
+            out["NOTICE_COLOR"] = value
+        elif "치수" in title:
+            out["NOTICE_SIZE"] = value
+    return out
+
+
+def enrich_details(session, rows, proxies, delay):
+    """각 행의 PRODUCT_NO 로 product-detail API 호출 → 상품정보(주소재/색상/치수) 채움.
+    실패는 건너뛰고(빈 값 유지) 계속 진행."""
+    total = len(rows)
+    print(f"\n[2단계] 상품정보 보강 {total}개 (product-detail API)")
+    ok = 0
+    for idx, row in enumerate(rows, 1):
+        no = row["PRODUCT_NO"]
+        if not no:
+            continue
+        data = request_json(session, "GET", PRODUCT_DETAIL_URL.format(no=no), proxies)
+        if data:
+            details = (data.get("data") or {}).get("itemDetailsList") or []
+            mapped = _map_item_details(details)
+            row.update(mapped)
+            if any(mapped.values()):
+                ok += 1
+        if idx <= 3 or idx % 50 == 0:
+            print(f"  [{idx}/{total}] {no} → 소재={row['NOTICE_MATERIAL'][:20]} "
+                  f"색상={row['NOTICE_COLOR'][:20]}")
+        time.sleep(delay)
+    print(f"[2단계 완료] 상품정보 {ok}/{total}")
 
 
 def save_csv(all_rows, now):
@@ -238,6 +287,8 @@ def main():
     ap.add_argument("--gender", default="", choices=["", "F", "M", "ALL"],
                     help="userSegment 성별 (기본: 통합은 ALL, --all-categories는 그룹따라 자동)")
     ap.add_argument("--delay", type=float, default=1.0, help="카테고리 간 딜레이(초)")
+    ap.add_argument("--no-detail", action="store_true", help="2단계(상품정보 상세) 생략")
+    ap.add_argument("--detail-delay", type=float, default=0.4, help="상세 요청 간 딜레이(초)")
     ap.add_argument("--no-proxy", action="store_true", help="회사 IP 직접 호출")
     args = ap.parse_args()
 
@@ -286,12 +337,25 @@ def main():
         print("\n[결과] 수집된 행 없음")
         return
 
-    out_path = save_csv(all_rows, now)
+    # [2단계] 상품정보 보강 — 무엇이 터져도 finally 에서 저장 (데이터 손실 방지)
+    out_path = None
+    try:
+        if not args.no_detail:
+            enrich_details(session, all_rows, proxies, args.detail_delay)
+    except KeyboardInterrupt:
+        print("\n[중단] 사용자 Ctrl+C — 여기까지 모은 데이터 저장")
+    except Exception as e:
+        print(f"\n[2단계 오류] {type(e).__name__}: {str(e)[:120]}")
+    finally:
+        out_path = save_csv(all_rows, now)
+
     print(f"\n[완료] {len(all_rows)}개 행 → {out_path}")
     subc = sum(1 for r in all_rows if r["SUB_CATEGORY"])
     liked = sum(1 for r in all_rows if r["LIKE_COUNT"] != "")
     coup = sum(1 for r in all_rows if r["DISCOUNT_COUPON_VALUE"] != "")
-    print(f"  채움률 — SUB_CATEGORY {subc}, LIKE {liked}, COUPON {coup} / {len(all_rows)}")
+    matc = sum(1 for r in all_rows if r["NOTICE_MATERIAL"])
+    print(f"  채움률 — SUB_CATEGORY {subc}, LIKE {liked}, COUPON {coup}, "
+          f"NOTICE_MATERIAL {matc} / {len(all_rows)}")
 
 
 if __name__ == "__main__":

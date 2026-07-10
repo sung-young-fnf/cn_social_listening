@@ -69,6 +69,10 @@ COLUMNS = [
     "PRICE", "DISCOUNT_PRICE", "DISCOUNT_COUPON_VALUE",
     "REVIEW_COUNT", "LIKE_COUNT", "VIEW_COUNT", "SELL_COUNT",
     "IMAGE_URL", "PRODUCT_NO",
+    # === 상세 base API 확장 (goods base=소재속성 / tags=연관태그 / essential=상품고시) ===
+    "TAGS", "MATERIAL",
+    "NOTICE_MATERIAL", "NOTICE_COLOR", "NOTICE_SIZE",
+    "PRODUCT_URL",   # 상품 상세 페이지 주소 (PRODUCT_NO 로 생성)
 ]
 
 # VALUE 컬럼: 상품 raw 데이터를 {c1..cN} JSON으로 저장.
@@ -251,6 +255,7 @@ def build_row(g, brand_slug, gf, rank_map, like_map, ymd):
         "VIEW_COUNT": "", "SELL_COUNT": "",                          # 2단계
         "IMAGE_URL": g.get("thumbnail", ""),
         "PRODUCT_NO": no,
+        "PRODUCT_URL": f"https://www.musinsa.com/products/{no}" if no else "",
     }
 
 
@@ -293,6 +298,79 @@ def _parse_next_data(html):
     sy, sn = meta.get("seasonYear") or "", meta.get("season") or ""
     out["season"] = f"{sy}/{sn}" if (sy or sn) else ""
     out["gender"] = _gender_from_meta(meta)
+    return out
+
+
+# === 상세 base API 확장 필드 (연관태그·소재속성·상품고시 일부) ===
+# goods-detail.musinsa.com/api2/goods/{no}          → goodsMaterial(소재 속성)
+# goods-detail.musinsa.com/api2/goods/{no}/tags     → 연관 태그(data.tags)
+# goods-detail.musinsa.com/api2/goods/{no}/essential → 상품 고시(제품소재/색상/치수)
+
+# enrich 로 채우는 확장 컬럼 (빈 값 기본). build_row 는 몰라도 되고 여기서 in-place 주입.
+EXTRA_COLUMNS = [
+    "TAGS", "MATERIAL",
+    "NOTICE_MATERIAL", "NOTICE_COLOR", "NOTICE_SIZE",
+]
+
+
+def _map_essentials(essentials):
+    """/essential 의 name/value 배열 → NOTICE_* 컬럼 매핑. 이름 변형(∙ 등) 관대 매칭.
+    상품 고시 정보안내 중 제품소재/색상/치수만 수집."""
+    out = {}
+    for e in essentials or []:
+        name = e.get("name", "") or ""
+        val = e.get("value", "") or ""
+        if "소재" in name:
+            out["NOTICE_MATERIAL"] = val
+        elif "색상" in name:
+            out["NOTICE_COLOR"] = val
+        elif "치수" in name:
+            out["NOTICE_SIZE"] = val
+    return out
+
+
+def _parse_material(goods_material):
+    """goodsMaterial.materials 의 부위별 isSelected=true 속성만 요약.
+    예: '핏:오버/사이즈 | 촉감:보통 | 계절:봄/여름/가을/겨울'."""
+    parts = []
+    for part in (goods_material or {}).get("materials", []) or []:
+        sel = [i.get("name", "") for i in part.get("items", []) if i.get("isSelected")]
+        if sel:
+            parts.append(f"{part.get('name', '')}:{'/'.join(sel)}")
+    return " | ".join(parts)
+
+
+def fetch_goods_extra(sess, no, hdr, proxies):
+    """base goods(소재속성) + tags(연관태그) + essential(상품고시) 수집 → dict.
+    실패해도 빈 dict 유지 (부분 실패 허용)."""
+    out = {c: "" for c in EXTRA_COLUMNS}
+    # 1) base goods → 소재 속성(핏/촉감/신축성 등)
+    try:
+        gr = sess.get(f"https://goods-detail.musinsa.com/api2/goods/{no}",
+                      headers=hdr, proxies=proxies, timeout=30)
+        if gr.status_code == 200:
+            d = gr.json().get("data") or {}
+            out["MATERIAL"] = _parse_material(d.get("goodsMaterial"))
+    except Exception:
+        pass
+    # 2) tags → 연관 태그
+    try:
+        tr = sess.get(f"https://goods-detail.musinsa.com/api2/goods/{no}/tags",
+                      headers=hdr, proxies=proxies, timeout=20)
+        if tr.status_code == 200:
+            tags = ((tr.json().get("data") or {}).get("tags")) or []
+            out["TAGS"] = " ".join(f"#{t}" for t in tags if t)
+    except Exception:
+        pass
+    # 3) essential → 상품 고시 (제품소재/색상/치수)
+    try:
+        er = sess.get(f"https://goods-detail.musinsa.com/api2/goods/{no}/essential",
+                      headers=hdr, proxies=proxies, timeout=20)
+        if er.status_code == 200:
+            essentials = ((er.json().get("data") or {}).get("essentials")) or []
+            out.update(_map_essentials(essentials))
+    except Exception:
+        pass
     return out
 
 
@@ -350,6 +428,14 @@ def enrich_details_http(rows, proxies, delay, limit):
                     print(f"  [{idx}/{total}] {no} stat status={sr.status_code}")
             except Exception as e:
                 print(f"  [{idx}/{total}] {no} stat 실패: {str(e)[:50]}")
+            # 3) base goods + tags → 연관태그/소재/판매자고시/상세이미지
+            try:
+                extra = fetch_goods_extra(sess, no, hdr, proxies)
+                row.update(extra)
+                if any(extra.values()):
+                    succeeded = True
+            except Exception as e:
+                print(f"  [{idx}/{total}] {no} extra 실패: {str(e)[:50]}")
 
             if succeeded:
                 ok += 1
