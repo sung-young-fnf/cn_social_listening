@@ -44,6 +44,8 @@
 - [x] [29cm] Best 월간 인기 TOP 100 크롤러 crawl_best.py 신규 — Oxylabs KR + 23컬럼 CSV, 소카테고리/쿠폰율 실측 반영 (2026-07-02)
 - [x] [무신사] 랭킹/브랜드 크롤러 상세 필드 확장 — 연관태그(#형태)·소재·판매자고시(AS)·상세이미지URL 10컬럼 추가 (goods base API+tags) (2026-07-10)
 - [x] [무신사] 상품 고시 정보안내 8컬럼 추가 (/essential API) — 제품소재 성분·색상·제조국·치수·제조사·세탁·품질보증·AS 구조화 수집 (2026-07-10)
+- [x] [무신사] 상세 확장 컬럼 최종 정리 — TAGS·MATERIAL·NOTICE(소재/색상/치수)·PRODUCT_URL 유지, 판매자고시·상세이미지·NOTICE 나머지 5개 제거 (2026-07-10)
+- [x] [29cm] Best 크롤러 상품정보 확장 — product-detail API(itemDetailsList)로 제품주소재·색상·치수·상품URL 4컬럼 추가, 무신사와 대칭 (2026-07-10)
 - [x] [Shopee] Oxylabs residential shopee.vn 403 차단 원인 진단 — 제한 e-commerce 타겟, KYC 필요 확인 (2026-07-02)
 - [x] [Shopee] insane-search 정찰 — curl/Jina/직접 전부 실패, 검색 API는 서명 벽 확인 (2026-07-02)
 - [x] [Shopee] Oxylabs shopee.vn + shopee.co.th KYC 신청 (spjeon@fnfcorp.com) (2026-07-02)

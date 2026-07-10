@@ -124,6 +124,7 @@ def build_row(it, gf, ymd):
         "VIEW_COUNT": "", "SELL_COUNT": "",                          # 2단계(stat)
         "IMAGE_URL": img.get("url", ""),
         "PRODUCT_NO": no,
+        "PRODUCT_URL": f"https://www.musinsa.com/products/{no}" if no else "",
     }
 
 

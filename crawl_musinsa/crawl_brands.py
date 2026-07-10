@@ -69,14 +69,10 @@ COLUMNS = [
     "PRICE", "DISCOUNT_PRICE", "DISCOUNT_COUPON_VALUE",
     "REVIEW_COUNT", "LIKE_COUNT", "VIEW_COUNT", "SELL_COUNT",
     "IMAGE_URL", "PRODUCT_NO",
-    # === 상세 base API 확장 (goods-detail.musinsa.com/api2/goods/{no} + /tags) ===
+    # === 상세 base API 확장 (goods base=소재속성 / tags=연관태그 / essential=상품고시) ===
     "TAGS", "MATERIAL",
-    "SELLER_NAME", "SELLER_CEO", "SELLER_BIZ_NO", "SELLER_MAILORDER_NO",
-    "SELLER_TEL", "SELLER_EMAIL", "SELLER_ADDRESS",
-    "DETAIL_IMAGES",
-    # === 상품 고시 정보안내 (/api2/goods/{no}/essential) ===
-    "NOTICE_MATERIAL", "NOTICE_COLOR", "NOTICE_SIZE", "NOTICE_MAKER",
-    "NOTICE_ORIGIN", "NOTICE_CARE", "NOTICE_WARRANTY", "NOTICE_AS",
+    "NOTICE_MATERIAL", "NOTICE_COLOR", "NOTICE_SIZE",
+    "PRODUCT_URL",   # 상품 상세 페이지 주소 (PRODUCT_NO 로 생성)
 ]
 
 # VALUE 컬럼: 상품 raw 데이터를 {c1..cN} JSON으로 저장.
@@ -259,6 +255,7 @@ def build_row(g, brand_slug, gf, rank_map, like_map, ymd):
         "VIEW_COUNT": "", "SELL_COUNT": "",                          # 2단계
         "IMAGE_URL": g.get("thumbnail", ""),
         "PRODUCT_NO": no,
+        "PRODUCT_URL": f"https://www.musinsa.com/products/{no}" if no else "",
     }
 
 
@@ -304,26 +301,21 @@ def _parse_next_data(html):
     return out
 
 
-# === 상세 base API 확장 필드 (연관태그·소재·판매자고시·상세이미지) ===
-# goods-detail.musinsa.com/api2/goods/{no}      → company/goodsMaterial/goodsContents
-# goods-detail.musinsa.com/api2/goods/{no}/tags → 연관 태그(data.tags)
-# 주의: 색상/제조사/제조국/치수 등 "상품 고시 정보안내" 상단 값은 판매자 이미지에
-#       박혀있어(goodsContents) 구조화 추출 불가 — 이미지 URL만 DETAIL_IMAGES로 수집.
-_IMG_SRC_RE = re.compile(r'src=["\']([^"\']+)["\']', re.I)
+# === 상세 base API 확장 필드 (연관태그·소재속성·상품고시 일부) ===
+# goods-detail.musinsa.com/api2/goods/{no}          → goodsMaterial(소재 속성)
+# goods-detail.musinsa.com/api2/goods/{no}/tags     → 연관 태그(data.tags)
+# goods-detail.musinsa.com/api2/goods/{no}/essential → 상품 고시(제품소재/색상/치수)
 
 # enrich 로 채우는 확장 컬럼 (빈 값 기본). build_row 는 몰라도 되고 여기서 in-place 주입.
 EXTRA_COLUMNS = [
-    "TAGS", "MATERIAL", "SELLER_NAME", "SELLER_CEO", "SELLER_BIZ_NO",
-    "SELLER_MAILORDER_NO", "SELLER_TEL", "SELLER_EMAIL", "SELLER_ADDRESS",
-    "DETAIL_IMAGES",
-    "NOTICE_MATERIAL", "NOTICE_COLOR", "NOTICE_SIZE", "NOTICE_MAKER",
-    "NOTICE_ORIGIN", "NOTICE_CARE", "NOTICE_WARRANTY", "NOTICE_AS",
+    "TAGS", "MATERIAL",
+    "NOTICE_MATERIAL", "NOTICE_COLOR", "NOTICE_SIZE",
 ]
 
 
 def _map_essentials(essentials):
     """/essential 의 name/value 배열 → NOTICE_* 컬럼 매핑. 이름 변형(∙ 등) 관대 매칭.
-    상품 고시 정보안내: 제품소재/색상/치수/제조사/제조국/세탁·취급주의/품질보증/AS."""
+    상품 고시 정보안내 중 제품소재/색상/치수만 수집."""
     out = {}
     for e in essentials or []:
         name = e.get("name", "") or ""
@@ -334,16 +326,6 @@ def _map_essentials(essentials):
             out["NOTICE_COLOR"] = val
         elif "치수" in name:
             out["NOTICE_SIZE"] = val
-        elif "제조국" in name:          # '제조사'보다 먼저 검사 (둘 다 '제조' 포함)
-            out["NOTICE_ORIGIN"] = val
-        elif "제조사" in name:
-            out["NOTICE_MAKER"] = val
-        elif "취급" in name or "세탁" in name:
-            out["NOTICE_CARE"] = val
-        elif "품질보증" in name:
-            out["NOTICE_WARRANTY"] = val
-        elif "A/S" in name or "책임자" in name:
-            out["NOTICE_AS"] = val
     return out
 
 
@@ -359,26 +341,16 @@ def _parse_material(goods_material):
 
 
 def fetch_goods_extra(sess, no, hdr, proxies):
-    """base goods API + tags 로 연관태그·소재·판매자고시·상세이미지 수집 → dict.
+    """base goods(소재속성) + tags(연관태그) + essential(상품고시) 수집 → dict.
     실패해도 빈 dict 유지 (부분 실패 허용)."""
     out = {c: "" for c in EXTRA_COLUMNS}
-    # 1) base goods → company/material/contents
+    # 1) base goods → 소재 속성(핏/촉감/신축성 등)
     try:
         gr = sess.get(f"https://goods-detail.musinsa.com/api2/goods/{no}",
                       headers=hdr, proxies=proxies, timeout=30)
         if gr.status_code == 200:
             d = gr.json().get("data") or {}
-            c = d.get("company") or {}
-            out["SELLER_NAME"] = c.get("name", "")
-            out["SELLER_CEO"] = c.get("ceoName", "")
-            out["SELLER_BIZ_NO"] = c.get("businessNumber", "")
-            out["SELLER_MAILORDER_NO"] = c.get("mailOrderReportNumber", "")
-            out["SELLER_TEL"] = c.get("phoneNumber", "")
-            out["SELLER_EMAIL"] = c.get("email", "")
-            out["SELLER_ADDRESS"] = " ".join(
-                x for x in [c.get("address", ""), c.get("detailAddress", "")] if x)
             out["MATERIAL"] = _parse_material(d.get("goodsMaterial"))
-            out["DETAIL_IMAGES"] = "|".join(_IMG_SRC_RE.findall(d.get("goodsContents") or ""))
     except Exception:
         pass
     # 2) tags → 연관 태그
@@ -390,7 +362,7 @@ def fetch_goods_extra(sess, no, hdr, proxies):
             out["TAGS"] = " ".join(f"#{t}" for t in tags if t)
     except Exception:
         pass
-    # 3) essential → 상품 고시 정보안내 (제품소재/색상/제조국/세탁/품질보증/AS)
+    # 3) essential → 상품 고시 (제품소재/색상/치수)
     try:
         er = sess.get(f"https://goods-detail.musinsa.com/api2/goods/{no}/essential",
                       headers=hdr, proxies=proxies, timeout=20)
