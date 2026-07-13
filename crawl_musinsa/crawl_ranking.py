@@ -19,7 +19,7 @@
 사용법:
     python crawl_musinsa/crawl_ranking.py                          # 무신사 일반 월간 top100
     python crawl_musinsa/crawl_ranking.py --store sport            # 무신사 스포츠 월간 top100
-    python crawl_musinsa/crawl_ranking.py --period WEEKLY --gf M   # 주간·남성
+    python crawl_musinsa/crawl_ranking.py --gf M                   # 월간·남성
     python crawl_musinsa/crawl_ranking.py --category 001           # 특정 카테고리 랭킹
     python crawl_musinsa/crawl_ranking.py --top 20                 # 상위 20개만
     python crawl_musinsa/crawl_ranking.py --no-detail              # 1단계만(빠름)
