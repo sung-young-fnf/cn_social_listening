@@ -46,12 +46,9 @@
 - [x] [무신사] 상품 고시 정보안내 8컬럼 추가 (/essential API) — 제품소재 성분·색상·제조국·치수·제조사·세탁·품질보증·AS 구조화 수집 (2026-07-10)
 - [x] [무신사] 상세 확장 컬럼 최종 정리 — TAGS·MATERIAL·NOTICE(소재/색상/치수)·PRODUCT_URL 유지, 판매자고시·상세이미지·NOTICE 나머지 5개 제거 (2026-07-10)
 - [x] [29cm] Best 크롤러 상품정보 확장 — product-detail API(itemDetailsList)로 제품주소재·색상·치수·상품URL 4컬럼 추가, 무신사와 대칭 (2026-07-10)
+- [x] [무신사] 랭킹 크롤러 성별 분리 수집 — --gf M,F 한 번 실행으로 남성/여성 필터 top100 각각 별도 파일(_men/_women) 저장 (2026-07-13)
 - [x] [Shopee] Oxylabs residential shopee.vn 403 차단 원인 진단 — 제한 e-commerce 타겟, KYC 필요 확인 (2026-07-02)
 - [x] [Shopee] insane-search 정찰 — curl/Jina/직접 전부 실패, 검색 API는 서명 벽 확인 (2026-07-02)
 - [x] [Shopee] Oxylabs shopee.vn + shopee.co.th KYC 신청 (spjeon@fnfcorp.com) (2026-07-02)
-- [ ] [무신사] crawl_ranking.py run() 콜러블 리팩터링 + S3 적재 연결 후 Airflow DAG 등록
-- [ ] [Shopee] Oxylabs KYC 승인 대기 (사용목적 소명 회신 필요)
-- [ ] [Shopee] KYC 승인 후 Playwright XHR 캡처 크롤러 구현 (VN/TH)
-- [ ] [무신사] SEASON 컬럼 형식 맞추기 (컬럼 형식 관련해서 Pill님과 논의 필요)
-- [ ] [무신사] 브랜드 크롤링 실행 후 S3/Snowflake 적재 - Pill님과 논의 필요
-- [ ] [샤오홍슈] 해시태그 선별 기준 결정 후 키워드 크롤 연동
+- [ ] [무신사] 소재 정보가 없는 상품 데이터 소재 적재 로직 구현
+- [ ] [29cm] 소재 정보가 없는 상품 데이터 소재 적재 로직 구현

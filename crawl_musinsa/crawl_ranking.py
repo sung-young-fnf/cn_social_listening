@@ -152,13 +152,67 @@ def build_row(it, gf, ymd):
 #
 # → 스토어가 늘어도 STORE_PRESETS 에 한 줄 + task 한 개만 추가.
 # ─────────────────────────────────────────────────────────────────────────
+# 성별 필터 → 출력 파일명 suffix. A(전체)는 기존 파일명 유지(하위호환).
+GENDER_LABEL = {"M": "men", "F": "women", "A": ""}
+
+
+def run_one_gender(sess, rsession, proxies, preset, gf, period, category, top,
+                   no_detail, detail_delay, detail_limit, now, ymd):
+    """성별 하나에 대한 랭킹 수집→좋아요→상세→CSV 저장 (성별별 파일 분리)."""
+    section = preset["section"]
+    store_code = preset["store_code"]
+    print(f"\n=== [{preset['label']}] gf={gf} 랭킹 수집 (store={store_code} "
+          f"section={section} period={period} category={category} top={top or '전체'}) ===")
+    items = fetch_ranking(sess, proxies, section, store_code, period, gf, category, top)
+    if not items:
+        print(f"  [결과] gf={gf} 랭킹 0개 — 건너뜀")
+        return None
+    rows = [build_row(it, gf, ymd) for it in items]
+    print(f"  랭킹 {len(rows)}개 수집 (rank {rows[0]['RANKING']}~{rows[-1]['RANKING']})")
+
+    # [1.5] 좋아요
+    nos = [r["PRODUCT_NO"] for r in rows if r["PRODUCT_NO"]]
+    like_map = fetch_like_counts(rsession, nos, proxies)
+    for r in rows:
+        r["LIKE_COUNT"] = like_map.get(r["PRODUCT_NO"], "")
+    print(f"  좋아요 {len(like_map)}개 매핑")
+
+    # 성별별 출력 prefix (M→_men, F→_women, A→기존)
+    suffix = GENDER_LABEL.get(gf, gf.lower())
+    prefix = f"{preset['prefix']}_{suffix}" if suffix else preset["prefix"]
+
+    # [2단계] 상세 enrich — 무엇이 터져도 finally 에서 저장
+    out_path = None
+    try:
+        if not no_detail:
+            enrich_details_http(rows, proxies, detail_delay, detail_limit)
+    except KeyboardInterrupt:
+        print("\n[중단] 사용자 Ctrl+C — 여기까지 모은 데이터 저장")
+        out_path = save_csv(rows, now, prefix=prefix)
+        raise
+    except Exception as e:
+        print(f"\n[2단계 오류] {type(e).__name__}: {str(e)[:120]}")
+        print("  → 1단계 수집분은 그대로 저장 (2단계 일부 필드만 비어있을 수 있음)")
+    finally:
+        out_path = save_csv(rows, now, prefix=prefix)
+
+    liked = sum(1 for r in rows if r["LIKE_COUNT"] != "")
+    catd = sum(1 for r in rows if r["MAIN_CATEGORY"] != "")
+    viewd = sum(1 for r in rows if r["VIEW_COUNT"] != "")
+    print(f"  [완료] gf={gf} {len(rows)}개 행 → {out_path}")
+    print(f"    채움률 — LIKE {liked}, CATEGORY {catd}, VIEW {viewd} / {len(rows)}")
+    return out_path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--store", default="musinsa", choices=list(STORE_PRESETS),
                     help="스토어 (musinsa=일반 랭킹, sport=무신사 스포츠 랭킹)")
     ap.add_argument("--period", default="MONTHLY", choices=VALID_PERIODS,
                     help="랭킹 기간 (기본 MONTHLY=최근 1개월)")
-    ap.add_argument("--gf", default="A", help="성별 필터 (A=전체, M=남성, F=여성)")
+    ap.add_argument("--gf", default="A",
+                    help="성별 필터. 콤마로 여러 개 가능 (A=전체, M=남성, F=여성). "
+                         "예: --gf M,F → 남성 top100·여성 top100 각각 별도 파일")
     ap.add_argument("--category", default=None,
                     help="카테고리 코드 (미지정 시 스토어 기본값: musinsa=000, sport=017000)")
     ap.add_argument("--top", type=int, default=100, help="수집 상위 개수 (0=전체)")
@@ -169,55 +223,29 @@ def main():
     args = ap.parse_args()
 
     preset = STORE_PRESETS[args.store]
-    section = preset["section"]
-    store_code = preset["store_code"]
     category = args.category or preset["category"]
+    genders = [g.strip().upper() for g in args.gf.split(",") if g.strip()]
 
     use_proxy = not args.no_proxy
     proxies = build_proxies_requests() if use_proxy else None
     sess = cffi.Session(impersonate="chrome")
+    rsession = requests.Session()
+    rsession.headers.update(HEADERS)
 
     now = datetime.now()
     ymd = (now.year, now.month, now.day)
 
-    print(f"\n=== [1단계] 랭킹 수집 [{preset['label']}] (store={store_code} section={section} "
-          f"period={args.period} gf={args.gf} category={category} top={args.top or '전체'}) ===")
-    items = fetch_ranking(sess, proxies, section, store_code, args.period, args.gf,
-                          category, args.top)
-    if not items:
-        print("[결과] 랭킹 아이템 0개 — 중단")
-        return
-    rows = [build_row(it, args.gf, ymd) for it in items]
-    print(f"  랭킹 {len(rows)}개 수집 (rank {rows[0]['RANKING']}~{rows[-1]['RANKING']})")
+    outputs = []
+    for gf in genders:
+        out = run_one_gender(sess, rsession, proxies, preset, gf, args.period,
+                             category, args.top, args.no_detail, args.detail_delay,
+                             args.detail_limit, now, ymd)
+        if out:
+            outputs.append((gf, out))
 
-    # [1.5] 좋아요 (requests 세션 사용 — crawl_brands.fetch_like_counts 재사용)
-    nos = [r["PRODUCT_NO"] for r in rows if r["PRODUCT_NO"]]
-    rsession = requests.Session()
-    rsession.headers.update(HEADERS)
-    like_map = fetch_like_counts(rsession, nos, proxies)
-    for r in rows:
-        r["LIKE_COUNT"] = like_map.get(r["PRODUCT_NO"], "")
-    print(f"  좋아요 {len(like_map)}개 매핑")
-
-    # [2단계] 상세 enrich — 무엇이 터져도 finally 에서 저장 (데이터 손실 방지)
-    out_path = None
-    try:
-        if not args.no_detail:
-            enrich_details_http(rows, proxies, args.detail_delay, args.detail_limit)
-    except KeyboardInterrupt:
-        print("\n[중단] 사용자 Ctrl+C — 여기까지 모은 데이터 저장")
-    except Exception as e:
-        print(f"\n[2단계 오류] {type(e).__name__}: {str(e)[:120]}")
-        print("  → 1단계 수집분은 그대로 저장 (2단계 일부 필드만 비어있을 수 있음)")
-    finally:
-        out_path = save_csv(rows, now, prefix=preset["prefix"])
-
-    print(f"\n[완료] {len(rows)}개 행 → {out_path}")
-    liked = sum(1 for r in rows if r["LIKE_COUNT"] != "")
-    catd = sum(1 for r in rows if r["MAIN_CATEGORY"] != "")
-    viewd = sum(1 for r in rows if r["VIEW_COUNT"] != "")
-    gend = sum(1 for r in rows if r["GENDER"] != "")
-    print(f"  채움률 — LIKE {liked}, CATEGORY {catd}, GENDER {gend}, VIEW {viewd} / {len(rows)}")
+    print(f"\n[전체 완료] {len(outputs)}개 파일:")
+    for gf, out in outputs:
+        print(f"  gf={gf} → {out}")
 
 
 if __name__ == "__main__":
