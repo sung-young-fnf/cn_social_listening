@@ -168,13 +168,16 @@ def get_json(session, url, params=None, proxies=None, retries=3):
     return None
 
 
-def fetch_goods_list(session, brand, gf, proxies, max_pages, delay):
+def fetch_goods_list(session, brand, gf, proxies, max_pages, delay,
+                     sort_code="POPULAR", top=0):
     """plp/goods 페이지네이션. page>1은 hmacId(서버 서명) 필수 →
-    page1만 params로 호출, 이후는 응답의 nextPageUrl 체인을 그대로 따라감."""
+    page1만 params로 호출, 이후는 응답의 nextPageUrl 체인을 그대로 따라감.
+    sort_code: POPULAR(추천순) / SALE_ONE_MONTH_COUNT(판매수량순 1개월) 등.
+    top: 상위 N개만 수집 (0=제한없음). N 채우면 조기 종료."""
     goods = []
     page = 1
     url = "https://api.musinsa.com/api2/dp/v2/plp/goods"
-    params = {"brand": brand, "gf": gf, "sortCode": "POPULAR",
+    params = {"brand": brand, "gf": gf, "sortCode": sort_code,
               "page": 1, "size": 60, "caller": "FLAGSHIP"}
     while True:
         if max_pages and page > max_pages:
@@ -190,6 +193,9 @@ def fetch_goods_list(session, brand, gf, proxies, max_pages, delay):
         pg = d.get("pagination") or {}
         print(f"    page {page}/{pg.get('totalPages') or '?'} → {len(lst)}개 "
               f"(누적 {len(goods)}/{pg.get('totalCount') or '?'})")
+        if top and len(goods) >= top:
+            goods = goods[:top]
+            break
         if not pg.get("hasNext"):
             break
         next_url = pg.get("nextPageUrl")
@@ -482,10 +488,77 @@ def save_csv(all_rows, now, prefix="musinsa_products"):
     return out_path
 
 
+# 판매수량순 기간 → (sortCode, 파일 suffix, 라벨). API 실측 검증된 값.
+SALES_SORT = {
+    "1m": ("SALE_ONE_MONTH_COUNT", "sale_1m", "판매수량순 1개월"),
+    "3m": ("SALE_THREE_MONTH_COUNT", "sale_3m", "판매수량순 3개월"),
+    "1y": ("SALE_ONE_YEAR_COUNT", "sale_1y", "판매수량순 1년"),
+}
+
+
+def collect_brands(session, brands, proxies, args, now, ymd,
+                   sort_code, top, rank_mode, prefix):
+    """브랜드 목록을 sort_code로 수집→랭킹→좋아요→상세→CSV 저장 (out_path 반환).
+    rank_mode: 'realtime'=브랜드 REALTIME 랭킹 매핑 / 'list'=정렬 리스트 순서를 RANKING으로."""
+    all_rows = []
+    for slug, gf in brands:
+        print(f"\n=== [1단계][{slug}] gf={gf} sort={sort_code} top={top or '전체'} ===")
+        goods = fetch_goods_list(session, slug, gf, proxies, args.max_pages,
+                                 args.delay, sort_code=sort_code, top=top)
+        if not goods:
+            print(f"  ⚠ 상품 없음 — slug 확인 필요")
+            continue
+        if rank_mode == "list":
+            # 정렬 리스트 순서 = 랭킹 (판매수량순 1위, 2위 ...)
+            rank_map = {str(g.get("goodsNo")): i for i, g in enumerate(goods, 1)
+                        if g.get("goodsNo")}
+        else:
+            rank_map = fetch_ranking(session, slug, gf, proxies)
+            print(f"  랭킹 {len(rank_map)}개 매핑")
+        nos = [str(g.get("goodsNo")) for g in goods if g.get("goodsNo")]
+        like_map = fetch_like_counts(session, nos, proxies)
+        print(f"  좋아요 {len(like_map)}개 수집")
+        for g in goods:
+            all_rows.append(build_row(g, slug, gf, rank_map, like_map, ymd))
+        print(f"  → {slug}: {len(goods)}개 행")
+
+    if not all_rows:
+        print("\n[결과] 수집된 행 없음")
+        return None
+
+    # [2단계] 상세 enrich — 무엇이 터져도 finally에서 1단계 데이터까지 저장
+    out_path = None
+    try:
+        if not args.no_detail:
+            enrich_details_http(all_rows, proxies, args.detail_delay, args.detail_limit)
+    except KeyboardInterrupt:
+        print("\n[중단] 사용자 Ctrl+C — 여기까지 모은 데이터 저장")
+        save_csv(all_rows, now, prefix=prefix)
+        raise
+    except Exception as e:
+        print(f"\n[2단계 오류] {type(e).__name__}: {str(e)[:120]}")
+        print("  → 1단계 수집분은 그대로 저장 (2단계 일부 필드만 비어있을 수 있음)")
+    finally:
+        out_path = save_csv(all_rows, now, prefix=prefix)
+
+    liked = sum(1 for r in all_rows if r["LIKE_COUNT"] != "")
+    catd = sum(1 for r in all_rows if r["MAIN_CATEGORY"] != "")
+    viewd = sum(1 for r in all_rows if r["VIEW_COUNT"] != "")
+    print(f"\n[완료] {len(all_rows)}개 행 → {out_path}")
+    print(f"  채움률 — LIKE {liked}, CATEGORY {catd}, VIEW {viewd} / {len(all_rows)}")
+    return out_path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--brand", help="단일 브랜드 slug (brands.txt 무시)")
     ap.add_argument("--gf", default="A", help="--brand와 함께 쓰는 성별필터 (A/M/F)")
+    ap.add_argument("--sales", action="store_true",
+                    help="판매수량순 기간별 수집 (기본 추천순 대신). --periods로 기간 지정")
+    ap.add_argument("--periods", default="1m,3m,1y",
+                    help="--sales 기간 (콤마): 1m=1개월, 3m=3개월, 1y=1년. 각 기간별 파일 분리")
+    ap.add_argument("--top", type=int, default=0,
+                    help="브랜드당 상위 N개 (0=전체). --sales 기본 100")
     ap.add_argument("--no-proxy", action="store_true")
     ap.add_argument("--max-pages", type=int, default=0, help="브랜드당 목록 페이지 상한 (0=전체)")
     ap.add_argument("--delay", type=float, default=1.0, help="요청 간 딜레이(초)")
@@ -512,48 +585,30 @@ def main():
 
     now = datetime.now()
     ymd = (now.year, now.month, now.day)
-
     print(f"\n대상 브랜드 {len(brands)}개: {[b[0] for b in brands]}")
-    all_rows = []
-    for slug, gf in brands:
-        print(f"\n=== [1단계][{slug}] gf={gf} ===")
-        goods = fetch_goods_list(session, slug, gf, proxies, args.max_pages, args.delay)
-        if not goods:
-            print(f"  ⚠ 상품 없음 — slug 확인 필요")
-            continue
-        rank_map = fetch_ranking(session, slug, gf, proxies)
-        print(f"  랭킹 {len(rank_map)}개 매핑")
-        nos = [str(g.get("goodsNo")) for g in goods if g.get("goodsNo")]
-        like_map = fetch_like_counts(session, nos, proxies)
-        print(f"  좋아요 {len(like_map)}개 수집")
-        for g in goods:
-            all_rows.append(build_row(g, slug, gf, rank_map, like_map, ymd))
-        print(f"  → {slug}: {len(goods)}개 행")
 
-    if not all_rows:
-        print("\n[결과] 수집된 행 없음")
-        return
-
-    # [2단계] 상세 enrich (HTTP) — 무엇이 터져도(네트워크 오류/Ctrl+C) finally에서
-    # 1단계 데이터까지 반드시 저장 (데이터 손실 방지).
-    out_path = None
-    try:
-        if not args.no_detail:
-            enrich_details_http(all_rows, proxies, args.detail_delay, args.detail_limit)
-    except KeyboardInterrupt:
-        print("\n[중단] 사용자 Ctrl+C — 여기까지 모은 데이터 저장")
-    except Exception as e:
-        print(f"\n[2단계 오류] {type(e).__name__}: {str(e)[:120]}")
-        print("  → 1단계 수집분은 그대로 저장 (2단계 일부 필드만 비어있을 수 있음)")
-    finally:
-        out_path = save_csv(all_rows, now)
-
-    print(f"\n[완료] {len(all_rows)}개 행 → {out_path}")
-    liked = sum(1 for r in all_rows if r["LIKE_COUNT"] != "")
-    ranked = sum(1 for r in all_rows if r["RANKING"] != "")
-    catd = sum(1 for r in all_rows if r["MAIN_CATEGORY"] != "")
-    viewd = sum(1 for r in all_rows if r["VIEW_COUNT"] != "")
-    print(f"  채움률 — LIKE {liked}, RANKING {ranked}, CATEGORY {catd}, VIEW {viewd} / {len(all_rows)}")
+    if args.sales:
+        # 판매수량순 기간별 — 기간마다 별도 파일 (top 기본 100)
+        top = args.top or 100
+        periods = [p.strip() for p in args.periods.split(",") if p.strip()]
+        outputs = []
+        for pkey in periods:
+            if pkey not in SALES_SORT:
+                print(f"  ⚠ 알 수 없는 기간 '{pkey}' (1m/3m/1y 중 선택) — 건너뜀")
+                continue
+            sort_code, suffix, label = SALES_SORT[pkey]
+            print(f"\n########## {label} top{top} ##########")
+            out = collect_brands(session, brands, proxies, args, now, ymd,
+                                 sort_code, top, "list", f"musinsa_products_{suffix}")
+            if out:
+                outputs.append((label, out))
+        print(f"\n[전체 완료] {len(outputs)}개 파일:")
+        for label, out in outputs:
+            print(f"  {label} → {out}")
+    else:
+        # 기존 추천순(POPULAR) 흐름 — REALTIME 랭킹 매핑
+        collect_brands(session, brands, proxies, args, now, ymd,
+                       "POPULAR", args.top, "realtime", "musinsa_products")
 
 
 if __name__ == "__main__":
