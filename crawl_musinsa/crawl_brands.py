@@ -11,14 +11,21 @@
     - 조회수 / 판매수               : goods-detail.musinsa.com/api2/goods/{no}/stat
                                      (pageViewTotal/purchaseTotal 원본 정확값 — 옛 DOM 버킷텍스트보다 정밀)
 
+대상 브랜드: brands_list.py 의 BRANDS 리스트 우선, 비었으면 brands.txt.
+
 사용법:
-    python crawl_musinsa/crawl_brands.py                  # brands.txt 전체 (1+2단계)
+    python crawl_musinsa/crawl_brands.py                  # 전체 브랜드 추천순 (1+2단계)
+    python crawl_musinsa/crawl_brands.py --sales          # 판매수량순 1개월/3개월/1년 top100
+    python crawl_musinsa/crawl_brands.py --sales --periods 1m   # 판매수량순 1개월만
     python crawl_musinsa/crawl_brands.py --no-detail      # 1단계만 (빠름)
-    python crawl_musinsa/crawl_brands.py --brand trillion --max-pages 1 --detail-limit 5
+    python crawl_musinsa/crawl_brands.py --brand adidas --sales --top 100
     python crawl_musinsa/crawl_brands.py --no-proxy       # 회사 IP 직접
 
-출력:
-    crawl_musinsa/output/musinsa_products_YYYYMMDD.csv
+출력 (브랜드별 파일 분리):
+    crawl_musinsa/output/musinsa_<브랜드>_YYYYMMDD.csv            (추천순)
+    crawl_musinsa/output/musinsa_<브랜드>_sale_1m_YYYYMMDD.csv    (판매수량순 1개월)
+    crawl_musinsa/output/musinsa_<브랜드>_sale_3m_YYYYMMDD.csv    (3개월)
+    crawl_musinsa/output/musinsa_<브랜드>_sale_1y_YYYYMMDD.csv    (1년)
 """
 import argparse
 import csv
@@ -143,15 +150,35 @@ def parse_brand_line(line):
     return slug, gf
 
 
-def load_brands(path):
+def _dedup_parse(lines):
+    """문자열 목록 → [(slug, gf), ...] (중복 제거)."""
     out, seen = [], set()
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            slug, gf = parse_brand_line(line)
-            if slug and (slug, gf) not in seen:
-                seen.add((slug, gf))
-                out.append((slug, gf))
+    for line in lines:
+        slug, gf = parse_brand_line(str(line))
+        if slug and (slug, gf) not in seen:
+            seen.add((slug, gf))
+            out.append((slug, gf))
     return out
+
+
+def load_brands(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return _dedup_parse(f)
+
+
+def load_brand_targets():
+    """대상 브랜드 결정: brands_list.BRANDS 우선, 비었으면 brands.txt."""
+    try:
+        from brands_list import BRANDS as BRAND_LIST
+    except Exception:
+        BRAND_LIST = []
+    if BRAND_LIST:
+        print(f"[brands] brands_list.py 사용 ({len(BRAND_LIST)}개)")
+        return _dedup_parse(BRAND_LIST)
+    if os.path.exists(BRANDS_FILE):
+        print(f"[brands] brands.txt 사용")
+        return load_brands(BRANDS_FILE)
+    return []
 
 
 # === [1단계] requests API ===
@@ -496,62 +523,54 @@ SALES_SORT = {
 }
 
 
-def collect_brands(session, brands, proxies, args, now, ymd,
-                   sort_code, top, rank_mode, prefix):
-    """브랜드 목록을 sort_code로 수집→랭킹→좋아요→상세→CSV 저장 (out_path 반환).
-    rank_mode: 'realtime'=브랜드 REALTIME 랭킹 매핑 / 'list'=정렬 리스트 순서를 RANKING으로."""
-    all_rows = []
-    for slug, gf in brands:
-        print(f"\n=== [1단계][{slug}] gf={gf} sort={sort_code} top={top or '전체'} ===")
-        goods = fetch_goods_list(session, slug, gf, proxies, args.max_pages,
-                                 args.delay, sort_code=sort_code, top=top)
-        if not goods:
-            print(f"  ⚠ 상품 없음 — slug 확인 필요")
-            continue
-        if rank_mode == "list":
-            # 정렬 리스트 순서 = 랭킹 (판매수량순 1위, 2위 ...)
-            rank_map = {str(g.get("goodsNo")): i for i, g in enumerate(goods, 1)
-                        if g.get("goodsNo")}
-        else:
-            rank_map = fetch_ranking(session, slug, gf, proxies)
-            print(f"  랭킹 {len(rank_map)}개 매핑")
-        nos = [str(g.get("goodsNo")) for g in goods if g.get("goodsNo")]
-        like_map = fetch_like_counts(session, nos, proxies)
-        print(f"  좋아요 {len(like_map)}개 수집")
-        for g in goods:
-            all_rows.append(build_row(g, slug, gf, rank_map, like_map, ymd))
-        print(f"  → {slug}: {len(goods)}개 행")
-
-    if not all_rows:
-        print("\n[결과] 수집된 행 없음")
+def crawl_brand_sort(session, slug, gf, proxies, args, now, ymd,
+                     sort_code, rank_mode, top, prefix):
+    """단일 브랜드 1개 정렬 수집→랭킹→좋아요→상세→CSV(브랜드명 포함 prefix) 저장.
+    rank_mode: 'realtime'=브랜드 REALTIME 랭킹 매핑 / 'list'=정렬 리스트 순서를 RANKING으로.
+    out_path 반환 (수집 0개면 None)."""
+    print(f"\n=== [{slug}] gf={gf} sort={sort_code} top={top or '전체'} ===")
+    goods = fetch_goods_list(session, slug, gf, proxies, args.max_pages,
+                             args.delay, sort_code=sort_code, top=top)
+    if not goods:
+        print(f"  ⚠ {slug} 상품 없음 — 건너뜀 (slug 확인 필요)")
         return None
+    if rank_mode == "list":
+        # 정렬 리스트 순서 = 랭킹 (판매수량순 1위, 2위 ...)
+        rank_map = {str(g.get("goodsNo")): i for i, g in enumerate(goods, 1)
+                    if g.get("goodsNo")}
+    else:
+        rank_map = fetch_ranking(session, slug, gf, proxies)
+        print(f"  랭킹 {len(rank_map)}개 매핑")
+    nos = [str(g.get("goodsNo")) for g in goods if g.get("goodsNo")]
+    like_map = fetch_like_counts(session, nos, proxies)
+    print(f"  좋아요 {len(like_map)}개 수집")
+    rows = [build_row(g, slug, gf, rank_map, like_map, ymd) for g in goods]
+    print(f"  {slug}: {len(rows)}개 수집")
 
     # [2단계] 상세 enrich — 무엇이 터져도 finally에서 1단계 데이터까지 저장
     out_path = None
     try:
         if not args.no_detail:
-            enrich_details_http(all_rows, proxies, args.detail_delay, args.detail_limit)
+            enrich_details_http(rows, proxies, args.detail_delay, args.detail_limit)
     except KeyboardInterrupt:
         print("\n[중단] 사용자 Ctrl+C — 여기까지 모은 데이터 저장")
-        save_csv(all_rows, now, prefix=prefix)
+        save_csv(rows, now, prefix=prefix)
         raise
     except Exception as e:
         print(f"\n[2단계 오류] {type(e).__name__}: {str(e)[:120]}")
         print("  → 1단계 수집분은 그대로 저장 (2단계 일부 필드만 비어있을 수 있음)")
     finally:
-        out_path = save_csv(all_rows, now, prefix=prefix)
+        out_path = save_csv(rows, now, prefix=prefix)
 
-    liked = sum(1 for r in all_rows if r["LIKE_COUNT"] != "")
-    catd = sum(1 for r in all_rows if r["MAIN_CATEGORY"] != "")
-    viewd = sum(1 for r in all_rows if r["VIEW_COUNT"] != "")
-    print(f"\n[완료] {len(all_rows)}개 행 → {out_path}")
-    print(f"  채움률 — LIKE {liked}, CATEGORY {catd}, VIEW {viewd} / {len(all_rows)}")
+    liked = sum(1 for r in rows if r["LIKE_COUNT"] != "")
+    catd = sum(1 for r in rows if r["MAIN_CATEGORY"] != "")
+    print(f"  [완료] {slug} {len(rows)}행 → {out_path} (LIKE {liked}, CATEGORY {catd})")
     return out_path
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--brand", help="단일 브랜드 slug (brands.txt 무시)")
+    ap.add_argument("--brand", help="단일 브랜드 slug (목록 파일 무시)")
     ap.add_argument("--gf", default="A", help="--brand와 함께 쓰는 성별필터 (A/M/F)")
     ap.add_argument("--sales", action="store_true",
                     help="판매수량순 기간별 수집 (기본 추천순 대신). --periods로 기간 지정")
@@ -570,12 +589,9 @@ def main():
     if args.brand:
         brands = [(args.brand, args.gf)]
     else:
-        if not os.path.exists(BRANDS_FILE):
-            print(f"[FAIL] {BRANDS_FILE} 없음")
-            sys.exit(1)
-        brands = load_brands(BRANDS_FILE)
+        brands = load_brand_targets()
     if not brands:
-        print("[FAIL] 대상 브랜드 없음 (brands.txt 확인)")
+        print("[FAIL] 대상 브랜드 없음 (brands_list.py 또는 brands.txt 확인)")
         sys.exit(1)
 
     use_proxy = not args.no_proxy
@@ -587,28 +603,34 @@ def main():
     ymd = (now.year, now.month, now.day)
     print(f"\n대상 브랜드 {len(brands)}개: {[b[0] for b in brands]}")
 
+    # 출력 파일명: musinsa_<브랜드>[_<정렬>]_<날짜>.csv (브랜드별 분리)
+    outputs = []
     if args.sales:
-        # 판매수량순 기간별 — 기간마다 별도 파일 (top 기본 100)
         top = args.top or 100
         periods = [p.strip() for p in args.periods.split(",") if p.strip()]
-        outputs = []
         for pkey in periods:
             if pkey not in SALES_SORT:
                 print(f"  ⚠ 알 수 없는 기간 '{pkey}' (1m/3m/1y 중 선택) — 건너뜀")
                 continue
             sort_code, suffix, label = SALES_SORT[pkey]
             print(f"\n########## {label} top{top} ##########")
-            out = collect_brands(session, brands, proxies, args, now, ymd,
-                                 sort_code, top, "list", f"musinsa_products_{suffix}")
-            if out:
-                outputs.append((label, out))
-        print(f"\n[전체 완료] {len(outputs)}개 파일:")
-        for label, out in outputs:
-            print(f"  {label} → {out}")
+            for slug, gf in brands:
+                out = crawl_brand_sort(session, slug, gf, proxies, args, now, ymd,
+                                       sort_code, "list", top,
+                                       f"musinsa_{slug}_{suffix}")
+                if out:
+                    outputs.append((f"{slug} {label}", out))
     else:
-        # 기존 추천순(POPULAR) 흐름 — REALTIME 랭킹 매핑
-        collect_brands(session, brands, proxies, args, now, ymd,
-                       "POPULAR", args.top, "realtime", "musinsa_products")
+        # 추천순(POPULAR) — REALTIME 랭킹 매핑, 브랜드별 파일
+        for slug, gf in brands:
+            out = crawl_brand_sort(session, slug, gf, proxies, args, now, ymd,
+                                   "POPULAR", "realtime", args.top, f"musinsa_{slug}")
+            if out:
+                outputs.append((slug, out))
+
+    print(f"\n[전체 완료] {len(outputs)}개 파일:")
+    for label, out in outputs:
+        print(f"  {label} → {out}")
 
 
 if __name__ == "__main__":
