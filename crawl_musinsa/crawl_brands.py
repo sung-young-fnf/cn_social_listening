@@ -608,13 +608,15 @@ def main():
     if args.sales:
         top = args.top or 100
         periods = [p.strip() for p in args.periods.split(",") if p.strip()]
-        for pkey in periods:
-            if pkey not in SALES_SORT:
-                print(f"  ⚠ 알 수 없는 기간 '{pkey}' (1m/3m/1y 중 선택) — 건너뜀")
-                continue
-            sort_code, suffix, label = SALES_SORT[pkey]
-            print(f"\n########## {label} top{top} ##########")
-            for slug, gf in brands:
+        unknown = [p for p in periods if p not in SALES_SORT]
+        for p in unknown:
+            print(f"  ⚠ 알 수 없는 기간 '{p}' (1m/3m/1y 중 선택) — 건너뜀")
+        periods = [p for p in periods if p in SALES_SORT]
+        # 브랜드별로 1개월·3개월·1년을 연속 수집한 뒤 다음 브랜드로.
+        for slug, gf in brands:
+            print(f"\n########## [{slug}] 판매수량순 {top}위 ({','.join(periods)}) ##########")
+            for pkey in periods:
+                sort_code, suffix, label = SALES_SORT[pkey]
                 out = crawl_brand_sort(session, slug, gf, proxies, args, now, ymd,
                                        sort_code, "list", top,
                                        f"musinsa_{slug}_{suffix}")
