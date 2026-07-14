@@ -3,15 +3,18 @@
 무신사 crawl_brands 와 달리 29CM 브랜드 스토어는 기간(개월) 필터가 없다 →
 판매순(MOST_SOLD) 정렬 후 top100 만 뽑는다. 브랜드당 파일 1개.
 
-  [1단계] 브랜드 상품 목록 (search-api)
-    GET search-api.29cm.co.kr/api/v4/products/brand
-        ?frontBrandNo={brandId}&count=100&page=1&sort=MOST_SOLD
-    → 판매순 100개 (itemNo·브랜드·정가·할인가·좋아요·리뷰·이미지)
+  [1단계] 브랜드 스토어 그리드 (실제 페이지와 동일 API)
+    POST display-bff-api.29cm.co.kr/api/v1/listing/items?colorchipVariant=control
+    body {"pageType":"BRAND_HOME","sortType":"MOST_SOLD",
+          "facets":{"brandFacetInputs":[{"frontBrandNo":<id>}]},
+          "pageRequest":{"page":1,"size":100}}
+    → data.list (판매순, itemEvent.eventProperties 에 카테고리 3-depth 포함)
+    ※ search-api/products/brand 는 정렬·카테고리가 스토어와 달라 쓰지 않는다.
   [2단계] 상세 보강 (crawl_best.enrich_details 재사용)
-    product-detail API 의 itemDetailsList → 제품 주소재/색상/치수(NOTICE_*)
+    product-detail itemDetailsList → 제품 주소재/색상/치수(NOTICE_*)
 
 대상 브랜드: brands_list.py 의 BRANDS = [(이름, brandId), ...].
-프록시·CSV·상세 로직은 crawl_best.py 를 재사용한다.
+상품 파싱(build_row)·프록시·상세·CSV 로직은 crawl_best.py 를 재사용한다.
 
 사용법:
     python crawl_29cm/crawl_brands.py                    # 리스트 전체 판매순 top100
@@ -35,17 +38,16 @@ import requests
 # crawl_best 의 공유 로직 재사용 (같은 폴더). 이 import 가 .env 로드 +
 # UTF-8 콘솔 고정(sys.stdout 재래핑)을 수행하므로 여기서 따로 하지 않는다.
 from crawl_best import (
-    HEADERS, COLUMNS, OUTPUT_DIR, PRODUCT_PAGE_URL,
-    fill_value, build_proxies, enrich_details,
+    HEADERS, COLUMNS, OUTPUT_DIR,
+    fill_value, build_proxies, request_json, enrich_details, build_row,
 )
 
-BRAND_PRODUCTS_URL = "https://search-api.29cm.co.kr/api/v4/products/brand"
-IMG_BASE = "https://img.29cm.co.kr"
+LISTING_URL = "https://display-bff-api.29cm.co.kr/api/v1/listing/items?colorchipVariant=control"
 
 
 def load_brand_targets():
-    """brands_list.BRANDS → [(name, brandId), ...]. 항목은 (이름,id) 튜플 /
-    id(int) / "이름:id" 문자열 모두 허용."""
+    """brands_list.BRANDS → [(name, brandId), ...]. (이름,id) 튜플 / id(int) /
+    "이름:id" 문자열 허용."""
     try:
         from brands_list import BRANDS
     except Exception as e:
@@ -68,50 +70,30 @@ def load_brand_targets():
     return out
 
 
-def fetch_brand_products(session, front_brand_no, top, proxies, retries=3):
-    """판매순(MOST_SOLD) 브랜드 상품 top N."""
-    params = {"frontBrandNo": front_brand_no, "count": top or 100,
-              "page": 1, "sort": "MOST_SOLD"}
-    for attempt in range(retries):
-        try:
-            r = session.get(BRAND_PRODUCTS_URL, params=params, proxies=proxies, timeout=25)
-            if r.status_code == 200:
-                return ((r.json().get("data") or {}).get("products")) or []
-            print(f"    ! status={r.status_code} (시도 {attempt+1})")
-        except Exception as e:
-            print(f"    ! 실패: {e} (시도 {attempt+1})")
-        time.sleep(1.5 * (attempt + 1))
-    return []
-
-
-def build_row(prod, rank, ymd):
-    """브랜드 상품(search-api) → 27컬럼 행. 카테고리/시즌/조회/판매는 미제공(빈값),
-    NOTICE_*는 2단계 enrich에서 채움."""
-    y, m, d = ymd
-    no = str(prod.get("itemNo", ""))
-    img = prod.get("imageUrl", "") or ""
-    return {
-        "VALUE": "",
-        "YEAR": y, "MONTH": m, "DAY": d,
-        "MAIN_CATEGORY": "", "MID_CATEGORY": "", "SUB_CATEGORY": "",  # brand-search 미제공
-        "GENDER_FILTER": "A",                                        # 판매순 전체
-        "RANKING": rank,                                             # 판매순 리스트 순서
-        "SEASON": "",
-        "BRAND": prod.get("frontBrandNameKor") or prod.get("frontBrandNameEng", ""),
-        "GENDER": "",
-        "PRODUCT_NUMBER": no,
-        "PRODUCT_NAME": prod.get("itemName", ""),
-        "PRICE": prod.get("consumerPrice", ""),        # 정가
-        "DISCOUNT_PRICE": prod.get("sellPrice", ""),   # 판매가
-        "DISCOUNT_COUPON_VALUE": prod.get("couponDiscountRate", ""),
-        "REVIEW_COUNT": prod.get("reviewCount", ""),
-        "LIKE_COUNT": prod.get("heartCount", ""),
-        "VIEW_COUNT": "", "SELL_COUNT": "",
-        "IMAGE_URL": (IMG_BASE + img) if img.startswith("/") else img,
-        "PRODUCT_NO": no,
-        "NOTICE_MATERIAL": "", "NOTICE_COLOR": "", "NOTICE_SIZE": "",
-        "PRODUCT_URL": PRODUCT_PAGE_URL.format(no=no) if no else "",
-    }
+def fetch_brand_products(session, front_brand_no, top, proxies):
+    """브랜드 스토어 그리드(listing/items) 를 판매순으로 페이지네이션하며 top N 수집."""
+    limit = top or 100
+    items = []
+    page = 1
+    size = min(100, limit)
+    while len(items) < limit:
+        body = {
+            "pageType": "BRAND_HOME",
+            "sortType": "MOST_SOLD",
+            "facets": {"brandFacetInputs": [{"frontBrandNo": front_brand_no}]},
+            "pageRequest": {"page": page, "size": size},
+        }
+        data = request_json(session, "POST", LISTING_URL, proxies, json_body=body)
+        if not data:
+            break
+        lst = (data.get("data") or {}).get("list") or []
+        if not lst:
+            break
+        items.extend(lst)
+        if len(lst) < size:
+            break
+        page += 1
+    return items[:limit]
 
 
 def save_csv(rows, now, prefix):
@@ -143,8 +125,10 @@ def crawl_one(session, name, brand_id, proxies, args, now, ymd):
     if not prods:
         print(f"  ⚠ {name}(brandId={brand_id}) 상품 없음 — 건너뜀 (brandId 확인)")
         return None
-    rows = [build_row(p, i, ymd) for i, p in enumerate(prods, 1)]
-    print(f"  {name}: {len(rows)}개 수집")
+    # crawl_best.build_row 재사용 (itemEvent/itemInfo 파싱 + 카테고리/가격/PRODUCT_URL).
+    # 판매순 리스트 순서 = RANKING, 성별필터는 전체(A).
+    rows = [build_row(p, i, "A", ymd) for i, p in enumerate(prods, 1)]
+    print(f"  {name}: {len(rows)}개 수집 (1위: {rows[0]['PRODUCT_NAME'][:30]})")
 
     out_path = None
     try:
@@ -159,8 +143,9 @@ def crawl_one(session, name, brand_id, proxies, args, now, ymd):
     finally:
         out_path = save_csv(rows, now, f"29cm_{name}_sale")
 
+    catd = sum(1 for r in rows if r["MAIN_CATEGORY"])
     mat = sum(1 for r in rows if r["NOTICE_MATERIAL"])
-    print(f"  [완료] {name} {len(rows)}행 → {out_path} (소재 {mat})")
+    print(f"  [완료] {name} {len(rows)}행 → {out_path} (카테고리 {catd}, 소재 {mat})")
     return out_path
 
 
