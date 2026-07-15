@@ -10,14 +10,18 @@
   - 게시물    : /api/v1/feed/user/{user_id}/?count=N                (최근 게시물, md 필드 형태)
   - 댓글 본문 수집 X — 게시물별 댓글 수(comment_count)만 컬럼에 포함.
 
+대상 계정: accounts_list.py 의 ACCOUNTS 우선, 비면 accounts.txt.
+봇 감지 회피: 기본 5계정마다 5분(--batch-size/--batch-rest) 휴식.
+
 사용법:
     python crawl_instagram/crawl_instagram_post.py --login    # 최초/만료 시 수동 로그인
-    python crawl_instagram/crawl_instagram_post.py            # 세션 자동 재사용, 최근 10개 수집
+    python crawl_instagram/crawl_instagram_post.py            # 세션 재사용, 계정별 최근 10개
     python crawl_instagram/crawl_instagram_post.py --account your.clothes___ --limit 10
+    python crawl_instagram/crawl_instagram_post.py --batch-size 5 --batch-rest 300
     python crawl_instagram/crawl_instagram_post.py --no-proxy
 
-출력:
-    crawl_instagram/output/instagram_posts_YYYYMMDD.csv
+출력 (계정별 파일 분리):
+    crawl_instagram/output/instagram_<account>_posts_YYYYMMDD.csv
 """
 import argparse
 import asyncio
@@ -34,8 +38,11 @@ from urllib.parse import urlparse
 
 import requests
 
-# UTF-8 콘솔 고정 (한글 깨짐 방지)
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
+# UTF-8 콘솔 고정 (한글 깨짐 방지). 통합 러너가 post/reels 모듈을 함께 import 할 때
+# 이중 래핑으로 버퍼가 닫히는 문제 방지 — sys 플래그로 1회만 래핑.
+if not getattr(sys, "_ig_stdout_utf8", False):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
+    sys._ig_stdout_utf8 = True
 
 try:
     from dotenv import load_dotenv
@@ -60,8 +67,8 @@ COLUMNS = [
     "CAPTION", "HASHTAGS", "MENTIONS",
     "LIKE_COUNT", "COMMENT_COUNT", "SHARE_COUNT", "CAROUSEL_COUNT",
     "IMAGE_URL", "THUMBNAIL_URL", "TAKEN_AT", "FETCHED_AT",
-    "AUTHOR_ID", "AUTHOR_USERNAME", "AUTHOR_DISPLAY_NAME", "AUTHOR_VERIFIED",
-    "AUTHOR_AVATAR_URL", "AUTHOR_FOLLOWERS", "AUTHOR_PROFILE_URL", "LANGUAGE",
+    "AUTHOR_ID", "AUTHOR_USERNAME", "AUTHOR_DISPLAY_NAME",
+    "AUTHOR_AVATAR_URL", "AUTHOR_FOLLOWERS", "AUTHOR_PROFILE_URL",
 ]
 
 SESSIONID_MIN_LEN = 20  # 게스트/빈 값 거르는 임계
@@ -290,6 +297,27 @@ def load_accounts(path):
     return out
 
 
+def load_account_targets():
+    """대상 계정 결정: accounts_list.ACCOUNTS 우선, 비었으면 accounts.txt."""
+    try:
+        from accounts_list import ACCOUNTS as AL
+    except Exception:
+        AL = []
+    if AL:
+        out, seen = [], set()
+        for line in AL:
+            u = parse_account_line(str(line))
+            if u and u not in seen:
+                seen.add(u)
+                out.append(u)
+        print(f"[accounts] accounts_list.py 사용 ({len(out)}개)")
+        return out
+    if os.path.exists(ACCOUNTS_FILE):
+        print("[accounts] accounts.txt 사용")
+        return load_accounts(ACCOUNTS_FILE)
+    return []
+
+
 # === 필드 추출 ===
 def parse_hashtags(text):
     return " ".join(re.findall(r"#([0-9A-Za-z_가-힣]+)", text or ""))
@@ -333,11 +361,9 @@ def extract_post_from_feed_item(item, profile, fetched_at):
         "AUTHOR_ID": user.get("pk", "") or profile.get("id", ""),
         "AUTHOR_USERNAME": user.get("username", "") or profile.get("username", ""),
         "AUTHOR_DISPLAY_NAME": user.get("full_name", "") or profile.get("full_name", ""),
-        "AUTHOR_VERIFIED": user.get("is_verified", profile.get("is_verified", "")),
         "AUTHOR_AVATAR_URL": user.get("profile_pic_url", "") or profile.get("profile_pic_url", ""),
         "AUTHOR_FOLLOWERS": profile.get("follower_count", ""),
         "AUTHOR_PROFILE_URL": f"https://www.instagram.com/{profile.get('username','')}/",
-        "LANGUAGE": "",
     }
 
 
@@ -432,10 +458,12 @@ def fetch_feed(session, user_id, count):
     return data.get("items") or []
 
 
-# === CSV 저장 (finally용, 파일잠김 fallback) ===
-def save_csv(rows, now):
+# === CSV 저장 (계정별 파일 분리, 파일잠김 fallback) ===
+def save_csv(rows, now, account):
+    """계정별 게시물 CSV 저장 → instagram_<account>_posts_YYYYMMDD.csv."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUTPUT_DIR, f"instagram_posts_{now.strftime('%Y%m%d')}.csv")
+    safe = re.sub(r"[^0-9A-Za-z._-]", "_", account)
+    out_path = os.path.join(OUTPUT_DIR, f"instagram_{safe}_posts_{now.strftime('%Y%m%d')}.csv")
 
     def _write(path):
         # 한국어 환경 Excel이 UTF-8 BOM을 무시하고 cp949로 읽어 한글이 깨지는 문제 →
@@ -449,7 +477,8 @@ def save_csv(rows, now):
     try:
         _write(out_path)
     except PermissionError:
-        out_path = os.path.join(OUTPUT_DIR, f"instagram_posts_{now.strftime('%Y%m%d_%H%M%S')}.csv")
+        out_path = os.path.join(
+            OUTPUT_DIR, f"instagram_{safe}_posts_{now.strftime('%Y%m%d_%H%M%S')}.csv")
         print(f"  ⚠ 기존 CSV 잠김 — 새 파일로 저장: {os.path.basename(out_path)}")
         _write(out_path)
     return out_path
@@ -472,17 +501,18 @@ def main():
     ap.add_argument("--keep-ip", action="store_true",
                     help="프록시 IP 세션 유지 (기본은 매 실행 새 IP로 초기화)")
     ap.add_argument("--delay", type=float, default=2.0, help="계정 간 딜레이(초)")
+    ap.add_argument("--batch-size", type=int, default=5,
+                    help="봇 감지 회피 — 이 계정 수마다 휴식 (기본 5)")
+    ap.add_argument("--batch-rest", type=int, default=300,
+                    help="배치 사이 휴식 초 (기본 300=5분)")
     args = ap.parse_args()
 
     if args.account:
         accounts = [args.account.strip()]
     else:
-        if not os.path.exists(ACCOUNTS_FILE):
-            print(f"[FAIL] {ACCOUNTS_FILE} 없음")
-            sys.exit(1)
-        accounts = load_accounts(ACCOUNTS_FILE)
+        accounts = load_account_targets()
     if not accounts:
-        print("[FAIL] 대상 계정 없음 (accounts.txt 확인)")
+        print("[FAIL] 대상 계정 없음 (accounts_list.py 또는 accounts.txt 확인)")
         sys.exit(1)
 
     use_proxy = not args.no_proxy
@@ -511,10 +541,22 @@ def main():
 
     now = datetime.now()
     fetched_at = now.isoformat()
-    all_rows = []
-    try:
-        for username in accounts:
-            print(f"\n=== [{username}] ===")
+    total = len(accounts)
+    batch_size = max(1, args.batch_size)
+    print(f"\n대상 계정 {total}개 — {batch_size}명마다 {args.batch_rest//60}분 휴식 (봇 감지 회피)")
+
+    outputs = []  # (username, 게시물수, 파일경로)
+    for idx, username in enumerate(accounts):
+        # 배치 경계에서 휴식 (5명 처리 후 다음 배치 진입 전)
+        if idx > 0 and idx % batch_size == 0:
+            print(f"\n[배치 휴식] {idx}/{total} 완료 — {args.batch_rest//60}분 대기...")
+            try:
+                time.sleep(args.batch_rest)
+            except KeyboardInterrupt:
+                print("\n[중단] 휴식 중 Ctrl+C — 종료")
+                break
+        print(f"\n=== [{idx+1}/{total}] {username} ===")
+        try:
             profile = fetch_profile(session, username)
             if not profile:
                 print(f"  ⚠ 프로필 조회 실패 — username/세션 확인 필요")
@@ -522,29 +564,25 @@ def main():
             print(f"  프로필 OK: id={profile['id']} 팔로워={profile['follower_count']} "
                   f"게시물={profile['media_count']} 비공개={profile['is_private']}")
 
-            rows = []
             items = fetch_feed(session, profile["id"], max(args.limit, 12))
-            if items:
-                for it in items[:args.limit]:
-                    rows.append(extract_post_from_feed_item(it, profile, fetched_at))
-                print(f"  게시물 {len(rows)}개 (feed API)")
+            rows = [extract_post_from_feed_item(it, profile, fetched_at)
+                    for it in (items or [])[:args.limit]]
+            if rows:
+                out_path = save_csv(rows, now, username)
+                outputs.append((username, len(rows), out_path))
+                print(f"  게시물 {len(rows)}개 → {os.path.basename(out_path)}")
             else:
                 print(f"  ⚠ 게시물 0개 (비공개 계정이거나 API 제한)")
-            all_rows.extend(rows)
-            time.sleep(args.delay)
-    except KeyboardInterrupt:
-        print("\n[중단] Ctrl+C — 여기까지 수집분 저장")
-    except Exception as e:
-        print(f"\n[오류] {type(e).__name__}: {str(e)[:120]} — 수집분 저장")
-    finally:
-        if all_rows:
-            out_path = save_csv(all_rows, now)
-            print(f"\n[완료] {len(all_rows)}개 행 → {out_path}")
-            liked = sum(1 for r in all_rows if r["LIKE_COUNT"] != "")
-            cmtd = sum(1 for r in all_rows if r["COMMENT_COUNT"] != "")
-            print(f"  채움률 — LIKE {liked}, COMMENT_COUNT {cmtd} / {len(all_rows)}")
-        else:
-            print("\n[결과] 수집된 행 없음")
+        except KeyboardInterrupt:
+            print("\n[중단] Ctrl+C — 종료 (여기까지 계정별 저장 완료)")
+            break
+        except Exception as e:
+            print(f"  [오류] {type(e).__name__}: {str(e)[:120]} — 이 계정 건너뜀")
+        time.sleep(args.delay)
+
+    print(f"\n[전체 완료] {len(outputs)}개 계정 게시물 CSV:")
+    for u, n, o in outputs:
+        print(f"  {u}: {n}개 → {os.path.basename(o)}")
 
 
 if __name__ == "__main__":
