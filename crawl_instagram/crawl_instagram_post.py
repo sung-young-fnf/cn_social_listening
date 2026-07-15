@@ -320,7 +320,7 @@ def load_account_targets():
 
 # === 필드 추출 ===
 def parse_hashtags(text):
-    return " ".join(re.findall(r"#([0-9A-Za-z_가-힣]+)", text or ""))
+    return " ".join(f"#{t}" for t in re.findall(r"#([0-9A-Za-z_가-힣]+)", text or ""))
 
 
 def parse_mentions(text):
