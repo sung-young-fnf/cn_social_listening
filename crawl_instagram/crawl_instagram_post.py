@@ -458,6 +458,18 @@ def fetch_feed(session, user_id, count):
     return data.get("items") or []
 
 
+# 인스타 프로필 상단 '고정(핀)' 게시물은 최신순과 무관하게 피드 맨 앞에 온다.
+# 핀은 최대 3개 → 여유분을 더 받아 taken_at 내림차순 재정렬 후 최신 N개만 취한다.
+PINNED_BUFFER = 6
+
+
+def fetch_recent_posts(session, user_id, limit):
+    """고정(핀) 게시물 보정 — 여유분 수집 후 실제 게시일(taken_at) 최신순 N개."""
+    items = fetch_feed(session, user_id, max(limit + PINNED_BUFFER, 12)) or []
+    items.sort(key=lambda it: it.get("taken_at") or 0, reverse=True)
+    return items[:limit]
+
+
 # === CSV 저장 (계정별 파일 분리, 파일잠김 fallback) ===
 def save_csv(rows, now, account):
     """계정별 게시물 CSV 저장 → instagram_<account>_posts_YYYYMMDD.csv."""
@@ -564,9 +576,8 @@ def main():
             print(f"  프로필 OK: id={profile['id']} 팔로워={profile['follower_count']} "
                   f"게시물={profile['media_count']} 비공개={profile['is_private']}")
 
-            items = fetch_feed(session, profile["id"], max(args.limit, 12))
-            rows = [extract_post_from_feed_item(it, profile, fetched_at)
-                    for it in (items or [])[:args.limit]]
+            items = fetch_recent_posts(session, profile["id"], args.limit)
+            rows = [extract_post_from_feed_item(it, profile, fetched_at) for it in items]
             if rows:
                 out_path = save_csv(rows, now, username)
                 outputs.append((username, len(rows), out_path))

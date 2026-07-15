@@ -108,9 +108,9 @@ def main():
 
             # 1) 게시물
             if not args.skip_posts:
-                items = ig_post.fetch_feed(session, profile["id"], max(args.limit, 12))
+                items = ig_post.fetch_recent_posts(session, profile["id"], args.limit)
                 prows = [ig_post.extract_post_from_feed_item(it, profile, fetched_at)
-                         for it in (items or [])[:args.limit]]
+                         for it in items]
                 if prows:
                     po = ig_post.save_csv(prows, now, username)
                     post_outputs.append((username, len(prows)))

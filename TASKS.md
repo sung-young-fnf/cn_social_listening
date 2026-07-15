@@ -54,5 +54,9 @@
 - [x] [Shopee] Oxylabs residential shopee.vn 403 차단 원인 진단 — 제한 e-commerce 타겟, KYC 필요 확인 (2026-07-02)
 - [x] [Shopee] insane-search 정찰 — curl/Jina/직접 전부 실패, 검색 API는 서명 벽 확인 (2026-07-02)
 - [x] [Shopee] Oxylabs shopee.vn + shopee.co.th KYC 신청 (spjeon@fnfcorp.com) (2026-07-02)
+- [x] [29cm] 브랜드 판매순 정렬 버그 수정 — search-api→display-bff listing/items(MOST_SOLD) 교체, 사이트와 순서 일치 + 카테고리 채움 (2026-07-15)
+- [x] [인스타그램] 크루 리스트 accounts_list.py 신규 (26SS MLB CREW 44계정), 5명마다 5분 휴식 배치, 계정별 게시글·릴스 CSV 분리 (2026-07-15)
+- [x] [인스타그램] 게시글+릴스 통합 러너 crawl_instagram_all.py 신규 — 로그인 1회로 계정마다 둘 다 수집 (2026-07-15)
+- [x] [인스타그램] 고정(핀) 게시물 보정 — taken_at 최신순 재정렬로 실제 최신 N개 수집, AUTHOR_VERIFIED·LANGUAGE 컬럼 제거 (2026-07-15)
 - [ ] [무신사] 소재 정보가 없는 상품 데이터 소재 적재 로직 구현
 - [ ] [29cm] 소재 정보가 없는 상품 데이터 소재 적재 로직 구현

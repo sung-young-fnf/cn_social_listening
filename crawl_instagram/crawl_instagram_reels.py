@@ -457,9 +457,16 @@ def fetch_profile(session, username):
     }
 
 
+# 고정(핀) 릴스는 최신순과 무관하게 앞에 올 수 있다(최대 3개) → 여유분 수집 후
+# taken_at 내림차순 재정렬해 실제 최신 N개만 취한다.
+PINNED_BUFFER = 6
+
+
 def fetch_reels(session, user_id, limit, delay=1.0):
     """릴스 전용 엔드포인트 clips/user 를 페이지네이션하며 릴스를 모은다.
-    feed/user(타임라인)는 릴스가 묻혀 비효율 → clips/user 가 릴스만 직접 반환."""
+    feed/user(타임라인)는 릴스가 묻혀 비효율 → clips/user 가 릴스만 직접 반환.
+    고정(핀) 릴스 보정 위해 여유분(limit+버퍼) 수집 후 게시일 최신순 N개."""
+    target = limit + PINNED_BUFFER
     reels = []
     max_id = None
     url = "https://www.instagram.com/api/v1/clips/user/"
@@ -480,7 +487,7 @@ def fetch_reels(session, user_id, limit, delay=1.0):
         reels.extend(page_reels)
         print(f"    clips page {page+1}: {len(items)}개 중 릴스 {len(page_reels)}개 "
               f"(누적 릴스 {len(reels)})")
-        if len(reels) >= limit:
+        if len(reels) >= target:
             break
         paging = js.get("paging_info") or {}
         if not paging.get("more_available"):
@@ -489,6 +496,8 @@ def fetch_reels(session, user_id, limit, delay=1.0):
         if not max_id:
             break
         time.sleep(delay)
+    # 고정(핀) 릴스가 앞에 낄 수 있으므로 실제 게시일 최신순으로 재정렬 후 N개
+    reels.sort(key=lambda it: it.get("taken_at") or 0, reverse=True)
     return reels[:limit]
 
 
