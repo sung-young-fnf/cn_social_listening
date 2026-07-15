@@ -13,10 +13,16 @@
 대상 계정: accounts_list.py 의 ACCOUNTS 우선, 비면 accounts.txt.
 봇 감지 회피: 기본 5계정마다 5분(--batch-size/--batch-rest) 휴식.
 
+수집 범위:
+  - 개수(--limit)가 아니라 날짜(--since, 기본 2026-01-01) 기준.
+    최신부터 taken_at >= --since 인 게시물을 feed/user max_id 페이지네이션으로 전부 수집.
+  - --limit N (>0) 은 계정당 최대 N개 안전상한, --max-pages 는 페이지 폭주 방지 상한.
+
 사용법:
     python crawl_instagram/crawl_instagram_post.py --login    # 최초/만료 시 수동 로그인
-    python crawl_instagram/crawl_instagram_post.py            # 세션 재사용, 계정별 최근 10개
-    python crawl_instagram/crawl_instagram_post.py --account your.clothes___ --limit 10
+    python crawl_instagram/crawl_instagram_post.py            # 세션 재사용, 계정별 2026-01-01 이후 전부
+    python crawl_instagram/crawl_instagram_post.py --since 2026-01-01   # 이 날짜 이후만 (기본값)
+    python crawl_instagram/crawl_instagram_post.py --account your.clothes___ --limit 50
     python crawl_instagram/crawl_instagram_post.py --batch-size 5 --batch-rest 300
     python crawl_instagram/crawl_instagram_post.py --no-proxy
 
@@ -29,6 +35,7 @@ import csv
 import io
 import json
 import os
+import random
 import re
 import secrets
 import sys
@@ -72,6 +79,27 @@ COLUMNS = [
 ]
 
 SESSIONID_MIN_LEN = 20  # 게스트/빈 값 거르는 임계
+DEFAULT_SINCE = "2026-01-01"  # 이 날짜(포함) 이후 게시물만 수집 (최신 → 이 날짜까지)
+
+
+def since_ts(since_str):
+    """'YYYY-MM-DD' → unix timestamp(로컬 자정). 파싱 실패 시 DEFAULT_SINCE."""
+    try:
+        return datetime.strptime(since_str, "%Y-%m-%d").timestamp()
+    except (ValueError, TypeError):
+        return datetime.strptime(DEFAULT_SINCE, "%Y-%m-%d").timestamp()
+
+
+DELAY_JITTER_MULT = 2.0  # 실제 대기 = base ~ base*이배 사이 랜덤 (봇 감지 회피)
+
+
+def sleep_jitter(base):
+    """base초 ~ base*DELAY_JITTER_MULT초 사이 랜덤 대기. 고정 간격 패턴 노출 방지."""
+    if base <= 0:
+        return 0.0
+    t = random.uniform(base, base * DELAY_JITTER_MULT)
+    time.sleep(t)
+    return t
 
 
 # === Oxylabs 프록시 (crawl_brands 패턴 재사용) ===
@@ -448,34 +476,65 @@ def fetch_profile(session, username):
     }
 
 
-def fetch_feed(session, user_id, count):
-    """/api/v1/feed/user/{id}/ → item 리스트. 실패 시 None."""
+def fetch_feed_page(session, user_id, count, max_id=None):
+    """feed/user 한 페이지 → (items, next_max_id, more_available)."""
+    params = {"count": count}
+    if max_id:
+        params["max_id"] = max_id
     data = get_json(
         session, f"https://www.instagram.com/api/v1/feed/user/{user_id}/",
-        params={"count": count})
+        params=params)
     if not data:
-        return None
-    return data.get("items") or []
+        return [], None, False
+    return (data.get("items") or [], data.get("next_max_id"),
+            bool(data.get("more_available")))
 
 
-# 인스타 프로필 상단 '고정(핀)' 게시물은 최신순과 무관하게 피드 맨 앞에 온다.
-# 핀은 최대 3개 → 여유분을 더 받아 taken_at 내림차순 재정렬 후 최신 N개만 취한다.
-PINNED_BUFFER = 6
+# 인스타 프로필 상단 '고정(핀)' 게시물은 최신순과 무관하게 피드 맨 앞에 온다(최대 3개).
+# 날짜 기준 수집에서는 오래된 핀이 1페이지에 껴도 '한 페이지 전체가 cutoff 이전일 때만'
+# 중단하고, 마지막에 taken_at 필터로 핀 잔재를 제거한다.
+POST_PAGE_SIZE = 12
+DEFAULT_MAX_PAGES = 30
 
 
-def fetch_recent_posts(session, user_id, limit):
-    """고정(핀) 게시물 보정 — 여유분 수집 후 실제 게시일(taken_at) 최신순 N개."""
-    items = fetch_feed(session, user_id, max(limit + PINNED_BUFFER, 12)) or []
-    items.sort(key=lambda it: it.get("taken_at") or 0, reverse=True)
-    return items[:limit]
+def fetch_posts_since(session, user_id, since_ts_val, limit=0,
+                      max_pages=DEFAULT_MAX_PAGES, delay=1.0):
+    """최신부터 taken_at >= since_ts_val 인 게시물을 max_id 페이지네이션으로 전부 수집.
+    limit>0 이면 최신 N개 안전상한, max_pages 는 폭주 방지 상한. 최신순 리스트 반환."""
+    collected, seen = [], set()
+    max_id = None
+    for page in range(max_pages):
+        items, next_max_id, more = fetch_feed_page(session, user_id, POST_PAGE_SIZE, max_id)
+        if not items:
+            break
+        for it in items:
+            pk = it.get("pk") or it.get("id")
+            if pk and pk not in seen:
+                seen.add(pk)
+                collected.append(it)
+        newest = max((it.get("taken_at") or 0) for it in items)
+        print(f"    feed page {page+1}: {len(items)}개 (누적 {len(collected)}, "
+              f"최신 {_ts_to_iso(newest)[:10]})")
+        # 이 페이지 전체가 cutoff 이전이면 (핀 제외 시계열이 cutoff 넘어감) 중단
+        if all((it.get("taken_at") or 0) < since_ts_val for it in items):
+            break
+        if not more or not next_max_id:
+            break
+        max_id = next_max_id
+        sleep_jitter(delay)
+    filtered = [it for it in collected if (it.get("taken_at") or 0) >= since_ts_val]
+    filtered.sort(key=lambda it: it.get("taken_at") or 0, reverse=True)
+    return filtered[:limit] if limit else filtered
 
 
 # === CSV 저장 (계정별 파일 분리, 파일잠김 fallback) ===
 def save_csv(rows, now, account):
-    """계정별 게시물 CSV 저장 → instagram_<account>_posts_YYYYMMDD.csv."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    """계정별 게시물 CSV 저장 → output/YYYYMMDD/instagram_<account>_posts_YYYYMMDD.csv.
+    실행 날짜별 하위 폴더에 모아 저장한다."""
+    day_dir = os.path.join(OUTPUT_DIR, now.strftime("%Y%m%d"))
+    os.makedirs(day_dir, exist_ok=True)
     safe = re.sub(r"[^0-9A-Za-z._-]", "_", account)
-    out_path = os.path.join(OUTPUT_DIR, f"instagram_{safe}_posts_{now.strftime('%Y%m%d')}.csv")
+    out_path = os.path.join(day_dir, f"instagram_{safe}_posts_{now.strftime('%Y%m%d')}.csv")
 
     def _write(path):
         # 한국어 환경 Excel이 UTF-8 BOM을 무시하고 cp949로 읽어 한글이 깨지는 문제 →
@@ -490,7 +549,7 @@ def save_csv(rows, now, account):
         _write(out_path)
     except PermissionError:
         out_path = os.path.join(
-            OUTPUT_DIR, f"instagram_{safe}_posts_{now.strftime('%Y%m%d_%H%M%S')}.csv")
+            day_dir, f"instagram_{safe}_posts_{now.strftime('%Y%m%d_%H%M%S')}.csv")
         print(f"  ⚠ 기존 CSV 잠김 — 새 파일로 저장: {os.path.basename(out_path)}")
         _write(out_path)
     return out_path
@@ -507,14 +566,20 @@ def rotate_proxy_ip():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--account", help="단일 username (accounts.txt 무시)")
-    ap.add_argument("--limit", type=int, default=10, help="계정당 최근 게시물 수 (기본 10)")
+    ap.add_argument("--since", default=DEFAULT_SINCE,
+                    help=f"이 날짜(YYYY-MM-DD) 이후 게시물만 수집 (기본 {DEFAULT_SINCE})")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="계정당 최대 게시물 수 안전상한 (0=무제한, 날짜 기준)")
+    ap.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES,
+                    help=f"계정당 피드 페이지 상한 — 폭주 방지 (기본 {DEFAULT_MAX_PAGES})")
     ap.add_argument("--login", action="store_true", help="강제 수동 로그인 (세션 갱신)")
     ap.add_argument("--no-proxy", action="store_true")
     ap.add_argument("--keep-ip", action="store_true",
                     help="프록시 IP 세션 유지 (기본은 매 실행 새 IP로 초기화)")
-    ap.add_argument("--delay", type=float, default=2.0, help="계정 간 딜레이(초)")
-    ap.add_argument("--batch-size", type=int, default=5,
-                    help="봇 감지 회피 — 이 계정 수마다 휴식 (기본 5)")
+    ap.add_argument("--delay", type=float, default=2.0,
+                    help="기본 딜레이(초). 실제 대기는 이 값~2배 사이 랜덤 지터")
+    ap.add_argument("--batch-size", type=int, default=2,
+                    help="봇 감지 회피 — 이 계정 수마다 휴식 (기본 2)")
     ap.add_argument("--batch-rest", type=int, default=300,
                     help="배치 사이 휴식 초 (기본 300=5분)")
     args = ap.parse_args()
@@ -553,9 +618,12 @@ def main():
 
     now = datetime.now()
     fetched_at = now.isoformat()
+    cutoff = since_ts(args.since)
     total = len(accounts)
     batch_size = max(1, args.batch_size)
-    print(f"\n대상 계정 {total}개 — {batch_size}명마다 {args.batch_rest//60}분 휴식 (봇 감지 회피)")
+    print(f"\n대상 계정 {total}개 — {args.since} 이후 게시물 수집 "
+          f"(limit={args.limit or '무제한'}, {batch_size}명마다 "
+          f"{args.batch_rest//60}분 휴식)")
 
     outputs = []  # (username, 게시물수, 파일경로)
     for idx, username in enumerate(accounts):
@@ -576,20 +644,21 @@ def main():
             print(f"  프로필 OK: id={profile['id']} 팔로워={profile['follower_count']} "
                   f"게시물={profile['media_count']} 비공개={profile['is_private']}")
 
-            items = fetch_recent_posts(session, profile["id"], args.limit)
+            items = fetch_posts_since(session, profile["id"], cutoff,
+                                      args.limit, args.max_pages, delay=args.delay)
             rows = [extract_post_from_feed_item(it, profile, fetched_at) for it in items]
             if rows:
                 out_path = save_csv(rows, now, username)
                 outputs.append((username, len(rows), out_path))
-                print(f"  게시물 {len(rows)}개 → {os.path.basename(out_path)}")
+                print(f"  게시물 {len(rows)}개 ({args.since} 이후) → {os.path.basename(out_path)}")
             else:
-                print(f"  ⚠ 게시물 0개 (비공개 계정이거나 API 제한)")
+                print(f"  ⚠ 게시물 0개 ({args.since} 이후 없음/비공개/API 제한)")
         except KeyboardInterrupt:
             print("\n[중단] Ctrl+C — 종료 (여기까지 계정별 저장 완료)")
             break
         except Exception as e:
             print(f"  [오류] {type(e).__name__}: {str(e)[:120]} — 이 계정 건너뜀")
-        time.sleep(args.delay)
+        sleep_jitter(args.delay)
 
     print(f"\n[전체 완료] {len(outputs)}개 계정 게시물 CSV:")
     for u, n, o in outputs:

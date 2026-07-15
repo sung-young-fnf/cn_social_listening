@@ -495,8 +495,9 @@ def save_csv(all_rows, now, prefix="musinsa_products"):
     prefix 로 출력 파일명 구분(브랜드=musinsa_products, 랭킹=musinsa_ranking 등)."""
     for row in all_rows:
         fill_value(row)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUTPUT_DIR, f"{prefix}_{now.strftime('%Y%m%d')}.csv")
+    day_dir = os.path.join(OUTPUT_DIR, now.strftime("%Y%m%d"))
+    os.makedirs(day_dir, exist_ok=True)
+    out_path = os.path.join(day_dir, f"{prefix}_{now.strftime('%Y%m%d')}.csv")
 
     def _write(path):
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
@@ -509,7 +510,7 @@ def save_csv(all_rows, now, prefix="musinsa_products"):
     except PermissionError:
         # 기존 파일이 다른 앱(엑셀/미리보기)에서 열려 잠김 → 시각 붙여 새 파일
         out_path = os.path.join(
-            OUTPUT_DIR, f"{prefix}_{now.strftime('%Y%m%d_%H%M%S')}.csv")
+            day_dir, f"{prefix}_{now.strftime('%Y%m%d_%H%M%S')}.csv")
         print(f"  ⚠ 기존 CSV 잠김 — 새 파일로 저장: {os.path.basename(out_path)}")
         _write(out_path)
     return out_path

@@ -100,8 +100,9 @@ def save_csv(rows, now, prefix):
     """VALUE(c1..cN) 채우고 브랜드별 CSV 저장. 파일 잠김 시 시각 붙여 새 파일."""
     for r in rows:
         fill_value(r)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUTPUT_DIR, f"{prefix}_{now.strftime('%Y%m%d')}.csv")
+    day_dir = os.path.join(OUTPUT_DIR, now.strftime("%Y%m%d"))
+    os.makedirs(day_dir, exist_ok=True)
+    out_path = os.path.join(day_dir, f"{prefix}_{now.strftime('%Y%m%d')}.csv")
 
     def _write(path):
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
@@ -112,7 +113,7 @@ def save_csv(rows, now, prefix):
     try:
         _write(out_path)
     except PermissionError:
-        out_path = os.path.join(OUTPUT_DIR, f"{prefix}_{now.strftime('%Y%m%d_%H%M%S')}.csv")
+        out_path = os.path.join(day_dir, f"{prefix}_{now.strftime('%Y%m%d_%H%M%S')}.csv")
         print(f"  ⚠ 기존 CSV 잠김 — 새 파일: {os.path.basename(out_path)}")
         _write(out_path)
     return out_path

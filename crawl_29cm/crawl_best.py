@@ -256,8 +256,9 @@ def save_csv(all_rows, now):
     """VALUE(c1..cN) 채우고 CSV 저장. 파일 잠김 시 시각 붙여 새 파일. out_path 반환."""
     for row in all_rows:
         fill_value(row)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUTPUT_DIR, f"29cm_best_{now.strftime('%Y%m%d')}.csv")
+    day_dir = os.path.join(OUTPUT_DIR, now.strftime("%Y%m%d"))
+    os.makedirs(day_dir, exist_ok=True)
+    out_path = os.path.join(day_dir, f"29cm_best_{now.strftime('%Y%m%d')}.csv")
 
     def _write(path):
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
@@ -268,7 +269,7 @@ def save_csv(all_rows, now):
     try:
         _write(out_path)
     except PermissionError:
-        out_path = os.path.join(OUTPUT_DIR, f"29cm_best_{now.strftime('%Y%m%d_%H%M%S')}.csv")
+        out_path = os.path.join(day_dir, f"29cm_best_{now.strftime('%Y%m%d_%H%M%S')}.csv")
         print(f"  ⚠ 기존 CSV 잠김 — 새 파일로 저장: {os.path.basename(out_path)}")
         _write(out_path)
     return out_path
