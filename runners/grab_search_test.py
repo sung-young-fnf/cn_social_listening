@@ -46,7 +46,6 @@ except ImportError:
 # === grab_xhs.py 함수 재사용 (로그인/프록시/IP검증 흐름 그대로) ===
 # 같은 runners/ 디렉토리라 직접 import 가능 (script dir이 sys.path[0]).
 from grab_xhs import (  # noqa: E402
-    build_proxy,
     verify_proxy_ip,
     find_system_chrome,
     is_real_login,
@@ -55,13 +54,38 @@ from grab_xhs import (  # noqa: E402
     save_cookies_to_file,
     diag_login_signals,
     _input_search_keyword,
+    _captcha_present,
+    ROTATE_MARKERS,
     load_xhs_creator_map,
+    load_persisted_sessid,
+    save_persisted_sessid,
+    save_session_state,
+    require_proxy_creds,
     shutdown,
     COOKIE_FILE,
     USER_DATA_DIR,
     OUTPUT_DIR,
     XHS_HOME_URL,
 )
+
+# 로컬 릴레이 — 브라우저 재실행/QR 없이 Oxylabs IP 핫스왑 (grab_xhs와 동일)
+try:
+    from oxylabs_relay import build_relay_from_env
+except ImportError:
+    from runners.oxylabs_relay import build_relay_from_env
+import secrets  # noqa: E402
+
+
+# === IP 교체(sessid 로테이션)를 유발하는 실패 판정 (테스트용) ===
+# grab_xhs와 동일 취지: 접속/차단성 실패는 IP 교체로 재시도, '계정 진짜 없음'은 제외.
+_ROTATE_REASONS = ("search_input_failed", "search_not_navigated", "goto_failed", "captcha")
+
+
+def _should_rotate(reason, msg):
+    if reason in _ROTATE_REASONS:
+        return True
+    m = msg or ""
+    return any(k in m for k in ROTATE_MARKERS)
 
 
 # === URL 폴링 헬퍼 (glob 대신 단순 포함 검사) ===
@@ -250,6 +274,9 @@ async def navigate_via_search_with_user_tab(page, user_id, nickname):
     #    (2026-06-30 확인). → 모달이 있으면 먼저 X로 닫고 [用户] 탭을 클릭한다.
     via = "用户"
     await _dismiss_captcha_modal(page)
+    # ★ 닫기 불가한 이미지 선택형 캡차가 떠 있으면 즉시 IP 교체 트리거
+    if await _captcha_present(page):
+        return False, "安全验证 captcha 감지 — IP 교체 필요", "captcha"
     print(f"     · [用户] 탭 클릭 후 사용자 목록에서 탐색")
     clicked = await _click_user_tab(page)
     if not clicked:
@@ -377,6 +404,11 @@ def parse_args():
                    help="배치 당 계정 수 (기본 10)")
     p.add_argument("--batch-rest", type=int, default=600,
                    help="배치 사이 휴식(초, 기본 600=10분). 0이면 휴식 없음")
+    # === IP 자동 교체 (릴레이 sessid 핫스왑) ===
+    p.add_argument("--max-ip-rotations", type=int, default=8,
+                   help="홈진입 실패/캡차 등 감지 시 IP 자동 교체 최대 횟수(전체 통틀어, 기본 8). 0=교체 안 함")
+    p.add_argument("--rotate-retries", type=int, default=2,
+                   help="한 계정에서 IP 교체 후 재시도 최대 횟수 (기본 2). 소진 시 해당 계정 SKIP")
     return p.parse_args()
 
 
@@ -411,7 +443,15 @@ async def main():
             print("[reset] cookie 파일 삭제")
     os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-    proxy = build_proxy()
+    # === 로컬 릴레이 기동 — 브라우저는 릴레이만 바라봄(재실행/QR 없이 IP 핫스왑) ===
+    require_proxy_creds()
+    initial_sessid = (os.getenv("OXYLABS_SESSID") or load_persisted_sessid()
+                      or f"auto_{secrets.token_hex(4)}")
+    save_persisted_sessid(initial_sessid)
+    relay = build_relay_from_env(sessid=initial_sessid)
+    await relay.start()
+    save_session_state(relay_port=relay.port)
+    proxy = {"server": relay.address}
 
     chrome_path = find_system_chrome()
     if not chrome_path:
@@ -491,6 +531,7 @@ async def main():
         session_invalid = False
         batch_size = max(1, args.batch_size)
         n_batches = (total + batch_size - 1) // batch_size
+        rotations_used = 0  # 전체 실행 통틀어 IP 교체 누적 (--max-ip-rotations 상한)
 
         for batch_idx in range(n_batches):
             b_start = batch_idx * batch_size
@@ -506,7 +547,33 @@ async def main():
                 nick_str = nickname or "(nickname 미등록)"
                 print(f"\n  [{idx}/{total}] {uid} ({nick_str})")
 
-                r = await check_profile(page, uid, nickname)
+                # 접속 실패(홈진입/검색박스/캡차 등)면 IP 교체 후 같은 계정 재시도
+                acct_rotate = 0
+                while True:
+                    r = await check_profile(page, uid, nickname)
+                    if r["entered"] or not _should_rotate(r["reason"], r["msg"]):
+                        break
+                    if args.max_ip_rotations <= 0 or rotations_used >= args.max_ip_rotations:
+                        print(f"  ⚠ IP 교체 한도 소진 ({rotations_used}/{args.max_ip_rotations}) — 교체 없이 SKIP")
+                        break
+                    if acct_rotate >= args.rotate_retries:
+                        print(f"  ⚠ 이 계정 IP 교체 재시도 {acct_rotate}회 소진 — SKIP")
+                        break
+                    acct_rotate += 1
+                    rotations_used += 1
+                    print(f"  ♻ IP 교체 트리거 (사유: {r['msg'][:45]}) "
+                          f"[누적 {rotations_used}/{args.max_ip_rotations}, "
+                          f"이 계정 {acct_rotate}/{args.rotate_retries}]")
+                    new_sessid = relay.rotate_sessid()
+                    save_persisted_sessid(new_sessid)
+                    await asyncio.sleep(4)  # 새 IP 정착 대기
+                    try:
+                        await verify_proxy_ip(page, ctx, args)  # 새 출구 IP 로그 + 회사IP fail-closed
+                    except SystemExit:
+                        await relay.close()
+                        raise
+                    # 루프 상단으로 → 같은 계정 새 IP로 재테스트
+
                 results[uid] = r
 
                 if r["entered"]:
@@ -545,11 +612,13 @@ async def main():
                 skip += 1
                 print(f"{label} ⏭ SKIP — {r['reason']}")
 
-        print(f"\n  진입 성공 {enter_ok} / 실패(SKIP) {skip} / 검사 {len(results)}")
+        print(f"\n  진입 성공 {enter_ok} / 실패(SKIP) {skip} / 검사 {len(results)} "
+              f"/ IP 교체 {rotations_used}회")
         if session_invalid:
             print("  ⚠ 세션 끊김으로 중단됨 — 나머지 미검사")
 
         await shutdown(ctx, args, reason="검사 완료")
+        await relay.close()
 
 
 if __name__ == "__main__":

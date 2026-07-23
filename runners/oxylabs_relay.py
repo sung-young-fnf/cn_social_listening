@@ -38,6 +38,7 @@ class OxylabsRelay:
         self._server = None
         self._rotations = 0
         self._active = set()                 # 열린 (cwriter, uwriter) 터널 — rotate 시 끊기
+        self._tasks = set()                  # 진행 중 _handle_client task — close 시 정리
 
     @staticmethod
     def _new_sessid():
@@ -93,20 +94,26 @@ class OxylabsRelay:
                 await self._server.wait_closed()
             except Exception:
                 pass
+        # 진행 중이던 연결 핸들러 task 정리 ('Task was destroyed' 경고 방지)
+        for t in list(self._tasks):
+            t.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
 
     async def _handle_client(self, creader, cwriter):
         """브라우저 연결 1건 처리. CONNECT 메서드만 지원(HTTPS 터널)."""
+        task = asyncio.current_task()
+        self._tasks.add(task)
         try:
             request_line = await creader.readline()
             if not request_line:
-                cwriter.close()
                 return
             parts = request_line.split()
             if len(parts) < 2 or parts[0].upper() != b"CONNECT":
                 # CONNECT 외(평문 http)는 미지원 — 브라우저는 https만 쓰므로 무시
                 cwriter.write(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
                 await cwriter.drain()
-                cwriter.close()
                 return
             target = parts[1].decode()   # host:port
             # 나머지 요청 헤더 소진 (빈 줄까지)
@@ -116,6 +123,9 @@ class OxylabsRelay:
                     break
             await self._tunnel(target, creader, cwriter)
         except Exception:
+            pass  # CancelledError는 그대로 전파 → finally에서 정리
+        finally:
+            self._tasks.discard(task)
             try:
                 cwriter.close()
             except Exception:
@@ -124,53 +134,66 @@ class OxylabsRelay:
     async def _tunnel(self, target, creader, cwriter):
         """Oxylabs에 CONNECT로 target 터널 요청 → 양방향 파이프."""
         try:
-            ureader, uwriter = await asyncio.open_connection(
-                self.upstream_host, self.upstream_port)
+            ureader, uwriter = await asyncio.wait_for(
+                asyncio.open_connection(self.upstream_host, self.upstream_port),
+                timeout=20)
         except Exception as e:
-            cwriter.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-            await cwriter.drain()
-            cwriter.close()
-            print(f"[relay] upstream 연결 실패: {e}")
+            try:
+                cwriter.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                await cwriter.drain()
+            except Exception:
+                pass
+            print(f"[relay] upstream 연결 실패: {str(e)[:60]}")
             return
 
-        # Oxylabs에 CONNECT + 현재 sessid의 Proxy-Authorization 전송
-        req = (f"CONNECT {target} HTTP/1.1\r\n"
-               f"Host: {target}\r\n").encode()
-        req += self._proxy_auth_header()
-        req += b"\r\n"
-        uwriter.write(req)
-        await uwriter.drain()
-
-        # Oxylabs 응답 헤더 읽기 (200이면 터널 확립)
-        status_line = await ureader.readline()
-        ok = b"200" in status_line
-        # 남은 응답 헤더 소진
-        while True:
-            line = await ureader.readline()
-            if line in (b"\r\n", b"\n", b""):
-                break
-
-        if not ok:
-            cwriter.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-            await cwriter.drain()
-            cwriter.close()
-            uwriter.close()
-            return
-
-        # 브라우저에 200 반환 → 이후 raw 양방향 중계
-        cwriter.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        await cwriter.drain()
-
-        pair = (cwriter, uwriter)
-        self._active.add(pair)   # rotate 시 끊을 수 있게 등록
+        piping = False
         try:
-            await asyncio.gather(
-                self._pipe(creader, uwriter),
-                self._pipe(ureader, cwriter),
-                return_exceptions=True,
-            )
+            # Oxylabs에 CONNECT + 현재 sessid의 Proxy-Authorization 전송
+            req = (f"CONNECT {target} HTTP/1.1\r\n"
+                   f"Host: {target}\r\n").encode()
+            req += self._proxy_auth_header()
+            req += b"\r\n"
+            uwriter.write(req)
+            await uwriter.drain()
+
+            # Oxylabs 응답 헤더 읽기 (200이면 터널 확립) — 상류가 멈추면 좀비 방지 위해 타임아웃
+            status_line = await asyncio.wait_for(ureader.readline(), timeout=30)
+            ok = b"200" in status_line
+            while True:  # 남은 응답 헤더 소진
+                line = await asyncio.wait_for(ureader.readline(), timeout=30)
+                if line in (b"\r\n", b"\n", b""):
+                    break
+
+            if not ok:
+                try:
+                    cwriter.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    await cwriter.drain()
+                except Exception:
+                    pass
+                return
+
+            # 브라우저에 200 반환 → 이후 raw 양방향 중계
+            cwriter.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await cwriter.drain()
+
+            pair = (cwriter, uwriter)
+            self._active.add(pair)   # rotate 시 끊을 수 있게 등록
+            piping = True
+            try:
+                await asyncio.gather(
+                    self._pipe(creader, uwriter),
+                    self._pipe(ureader, cwriter),
+                    return_exceptions=True,
+                )
+            finally:
+                self._active.discard(pair)
         finally:
-            self._active.discard(pair)
+            # 파이프까지 못 간 경우(핸드셰이크 실패/타임아웃) upstream 소켓 정리
+            if not piping:
+                try:
+                    uwriter.close()
+                except Exception:
+                    pass
 
     @staticmethod
     async def _pipe(reader, writer):
