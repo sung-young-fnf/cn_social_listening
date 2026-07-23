@@ -1691,11 +1691,11 @@ def parse_args():
                    help="계정 간 최대 지터 (초, 기본 7)")
 
     # === IP 자동 교체 (릴레이 sessid 핫스왑) ===
-    p.add_argument("--max-ip-rotations", type=int, default=8,
-                   help="홈진입 실패/캡차 등 감지 시 IP 자동 교체 최대 횟수(전체 실행 통틀어, 기본 8). "
+    p.add_argument("--max-ip-rotations", type=int, default=300,
+                   help="홈진입 실패/캡차 등 감지 시 IP 자동 교체 최대 횟수(전체 실행 통틀어, 기본 300). "
                         "0=교체 안 함")
-    p.add_argument("--rotate-retries", type=int, default=2,
-                   help="한 계정에서 IP 교체 후 재시도 최대 횟수 (기본 2). 소진 시 해당 계정 SKIP")
+    p.add_argument("--rotate-retries", type=int, default=3,
+                   help="한 계정에서 IP 교체 후 재시도 최대 횟수 (기본 3). 소진 시 해당 계정 SKIP")
 
     # === 이미지 다운로드 (기본 ON — S3 적재용) ===
     p.add_argument("--no-images", action="store_true",
