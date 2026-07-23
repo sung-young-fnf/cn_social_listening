@@ -36,6 +36,12 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from playwright.async_api import async_playwright
 
+# 로컬 릴레이 프록시 — 브라우저 재실행 없이 Oxylabs IP 핫스왑 (같은 runners/ 디렉토리)
+try:
+    from oxylabs_relay import OxylabsRelay, build_relay_from_env
+except ImportError:
+    from runners.oxylabs_relay import OxylabsRelay, build_relay_from_env
+
 # .env 로드 (Oxylabs 자격증명 등) — 없어도 silent fail
 try:
     from dotenv import load_dotenv
@@ -514,7 +520,7 @@ async def _input_search_keyword(page, keyword):
     search_input = None
     for sel in search_selectors:
         try:
-            elem = await page.wait_for_selector(sel, timeout=3000, state="visible")
+            elem = await page.wait_for_selector(sel, timeout=20000, state="visible")
             if elem:
                 search_input = elem
                 break
@@ -526,10 +532,10 @@ async def _input_search_keyword(page, keyword):
     # 3. click(활성화) → 클리어 → keyboard.type → Enter
     try:
         try:
-            await search_input.click(timeout=5000)
+            await search_input.click(timeout=20000)
         except Exception:
             try:
-                await search_input.click(force=True, timeout=5000)
+                await search_input.click(force=True, timeout=20000)
             except Exception:
                 await search_input.evaluate("el => el.focus()")
         await asyncio.sleep(0.5)  # overlay 모달 뜰 시간
@@ -560,12 +566,12 @@ async def _click_user_tab(page):
     # 1. 정확 셀렉터 — id=user (class=channel)
     tab = page.locator("div#user.channel").first
     try:
-        await tab.wait_for(state="visible", timeout=5000)
+        await tab.wait_for(state="visible", timeout=20000)
     except Exception:
         # id 변형 대비 — channel div 중 텍스트 '用户'
         tab = page.locator("div.channel", has_text="用户").first
         try:
-            await tab.wait_for(state="visible", timeout=3000)
+            await tab.wait_for(state="visible", timeout=20000)
         except Exception:
             print("     · [diag] 用户 탭(div#user.channel) 못 찾음")
             return False
@@ -587,8 +593,8 @@ async def _click_user_tab(page):
 
     # 3. fallback — 일반 click (force 포함)
     for method in (
-        lambda: tab.click(timeout=3000),
-        lambda: tab.click(force=True, timeout=3000),
+        lambda: tab.click(timeout=20000),
+        lambda: tab.click(force=True, timeout=20000),
     ):
         try:
             await method()
@@ -653,6 +659,37 @@ async def _dismiss_captcha_modal(page):
     return False
 
 
+# === 캡차 존재 감지 (닫기 불가한 이미지 선택형 포함) ===
+async def _captcha_present(page):
+    """安全验证 캡차 모달이 화면에 떠 있으면 True. 닫기 시도와 무관하게 '떴는지'만 판정.
+    이미지 선택형(不是交通工具...)은 자동으로 못 닫으므로, 뜨면 IP 교체가 답."""
+    for sel in ("div.captcha-modal-content", "div.captcha-modal-title",
+                "div.captcha-modal__close"):
+        try:
+            if await page.locator(sel).first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+# === IP 교체(sessid 로테이션)를 유발하는 실패 마커 ===
+# 홈 진입 실패(ERR_TUNNEL 등 죽은 IP) / 검색박스 못 찾음 / [用户]탭 클릭 실패(캡차 등) /
+# 安全验证 캡차 감지 → 새 IP 받으면 대개 해소됨. '계정이 진짜 없음(用户 탭에 카드 없음)'은
+# IP 문제가 아니므로 제외.
+ROTATE_MARKERS = (
+    "홈 진입 실패", "검색 박스", "[用户] 탭 클릭 실패", "安全验证", "captcha",
+)
+
+
+def should_rotate_ip(skip_reason, skip_msg):
+    """이 SKIP이 IP 교체로 해소될 만한 실패인지 판정."""
+    if skip_reason != "search_failed":
+        return False
+    msg = skip_msg or ""
+    return any(k in msg for k in ROTATE_MARKERS)
+
+
 async def navigate_via_search(page, user_id, nickname):
     """검색 박스 + Enter → [用户] 탭 클릭 → user 카드 href 추출 → goto. 반환: (success, msg).
 
@@ -698,6 +735,9 @@ async def navigate_via_search(page, user_id, nickname):
     # ★ 검색 직후 '安全验证(请勿频繁操作)' captcha 모달이 떠서 탭 클릭을 막는 경우가 있음
     #   (2026-06-30 확인). → 모달이 있으면 먼저 X로 닫고 [用户] 탭을 클릭한다.
     await _dismiss_captcha_modal(page)
+    # ★ 닫기 불가한 이미지 선택형 캡차가 떠 있으면 즉시 IP 교체 트리거 (탭클릭 20초 낭비 방지)
+    if await _captcha_present(page):
+        return False, "安全验证 captcha 감지 — IP 교체 필요"
     print(f"     · [用户] 탭 클릭 후 사용자 목록에서 탐색")
     if not await _click_user_tab(page):
         # 탭 클릭 실패 — 모달이 (다시) 떠있을 수 있음. 한 번 더 닫고 재시도.
@@ -707,7 +747,7 @@ async def navigate_via_search(page, user_id, nickname):
     await asyncio.sleep(2.5)  # 用户 목록 로딩 대기
     user_link = page.locator(f"a[href*='/user/profile/{user_id}']").first
     try:
-        await user_link.wait_for(state="visible", timeout=6000)
+        await user_link.wait_for(state="visible", timeout=20000)
     except Exception:
         return False, f"검색 결과에 user_id={user_id[:10]}... 없음 (用户 탭)"
 
@@ -737,7 +777,7 @@ async def navigate_via_search(page, user_id, nickname):
 
     # 7. URL 전환 검증
     try:
-        await page.wait_for_url(f"**/user/profile/{user_id}*", timeout=10000)
+        await page.wait_for_url(f"**/user/profile/{user_id}*", timeout=20000)
     except Exception:
         return False, f"URL 미전환 (현재: {page.url[:100]})"
 
@@ -1650,6 +1690,13 @@ def parse_args():
     p.add_argument("--gap-max", type=float, default=7.0,
                    help="계정 간 최대 지터 (초, 기본 7)")
 
+    # === IP 자동 교체 (릴레이 sessid 핫스왑) ===
+    p.add_argument("--max-ip-rotations", type=int, default=8,
+                   help="홈진입 실패/캡차 등 감지 시 IP 자동 교체 최대 횟수(전체 실행 통틀어, 기본 8). "
+                        "0=교체 안 함")
+    p.add_argument("--rotate-retries", type=int, default=2,
+                   help="한 계정에서 IP 교체 후 재시도 최대 횟수 (기본 2). 소진 시 해당 계정 SKIP")
+
     # === 이미지 다운로드 (기본 ON — S3 적재용) ===
     p.add_argument("--no-images", action="store_true",
                    help="이미지 다운로드 OFF (메타데이터만 빠르게)")
@@ -1753,7 +1800,17 @@ async def main():
             print(f"[reset] cookie 파일 삭제")
     os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-    proxy = build_proxy()
+    # === 로컬 릴레이 기동 — 브라우저는 릴레이만 바라본다(재실행/QR 없이 IP 핫스왑) ===
+    # 초기 sessid: 환경변수 > 영속 파일 > 신규. build_proxy와 동일 우선순위.
+    require_proxy_creds()  # OXYLABS_USERNAME/PASSWORD fail-closed
+    initial_sessid = (os.getenv("OXYLABS_SESSID") or load_persisted_sessid()
+                      or f"auto_{secrets.token_hex(4)}")
+    save_persisted_sessid(initial_sessid)
+    relay = build_relay_from_env(sessid=initial_sessid)
+    await relay.start()
+    save_session_state(relay_port=relay.port)
+    # 브라우저 프록시 = 로컬 릴레이 (Oxylabs 직결 아님)
+    proxy = {"server": relay.address}
 
     # 시스템 Chrome fail-closed (회사 IP 보호 정책 — 번들 Chromium fallback X)
     chrome_path = find_system_chrome()
@@ -1832,8 +1889,8 @@ async def main():
             stable = await verify_login_stable(page, ctx, timeout=30, stable_count=2, interval=3)
             if not stable:
                 print(f"  ⚠ 안정화 timeout — state 늦게 갱신될 수 있음. 그래도 진행")
-            # cookie 후속 발급 시간 + state hydrate 확보
-            await asyncio.sleep(5)
+            # QR 로그인 직후 무조건 20초 대기 후 시작 (cookie 후속 발급 + state hydrate 확보)
+            await asyncio.sleep(20)
             # [diag] 안정화 후 — 1차 실행에서 cookie 완전체 확인
             await diag_login_signals(page, ctx, label="QR 로그인 안정화 후")
             await save_cookies_to_file(ctx, label="(new login) ")
@@ -1845,6 +1902,7 @@ async def main():
         batch_size = max(1, args.batch_size)
         n_batches = (total + batch_size - 1) // batch_size
         session_invalid = False
+        rotations_used = 0  # 전체 실행 통틀어 IP 교체 누적 (--max-ip-rotations 상한)
 
         for batch_idx in range(n_batches):
             b_start = batch_idx * batch_size
@@ -1864,9 +1922,37 @@ async def main():
                 nickname = creator_map.get(uid)
                 nick_str = f" ({nickname})" if nickname else " (nickname 미등록)"
                 print(f"\n  [{global_idx}/{total}] user_id={uid}{nick_str}")
-                data = await collect_notes(page, uid, max_pages=args.max_pages,
-                                            date_start=date_start, date_end=date_end,
-                                            nickname=nickname)
+
+                # 수집 — 홈진입 실패/캡차 등 IP성 실패면 릴레이로 IP 교체 후 같은 계정 재시도.
+                acct_rotate = 0
+                while True:
+                    data = await collect_notes(page, uid, max_pages=args.max_pages,
+                                                date_start=date_start, date_end=date_end,
+                                                nickname=nickname)
+                    if not (data.get("skipped") and
+                            should_rotate_ip(data.get("skip_reason"), data.get("skip_msg"))):
+                        break  # 성공했거나, IP로 안 풀리는 실패(계정 없음 등) → 그대로 진행
+                    if args.max_ip_rotations <= 0 or rotations_used >= args.max_ip_rotations:
+                        print(f"  ⚠ IP 교체 한도 소진 ({rotations_used}/{args.max_ip_rotations}) "
+                              f"— 교체 없이 SKIP")
+                        break
+                    if acct_rotate >= args.rotate_retries:
+                        print(f"  ⚠ 이 계정 IP 교체 재시도 {acct_rotate}회 소진 — SKIP")
+                        break
+                    acct_rotate += 1
+                    rotations_used += 1
+                    print(f"  ♻ IP 교체 트리거 (사유: {data.get('skip_msg', '')[:45]}) "
+                          f"[누적 {rotations_used}/{args.max_ip_rotations}, "
+                          f"이 계정 {acct_rotate}/{args.rotate_retries}]")
+                    new_sessid = relay.rotate_sessid()
+                    save_persisted_sessid(new_sessid)
+                    await asyncio.sleep(4)  # 새 IP 정착 대기
+                    try:
+                        await verify_proxy_ip(page, ctx, args)  # 새 출구 IP 로그 + 회사IP fail-closed
+                    except SystemExit:
+                        await relay.close()
+                        raise
+                    # 루프 상단으로 → 같은 계정 새 IP로 재수집
 
                 # SKIP 처리 — nickname 없음 또는 검색 실패 시 collect_notes가 일찍 반환
                 if data.get("skipped"):
@@ -2038,7 +2124,8 @@ async def main():
                 success_count += 1
                 print(f"  {uid_label}{nick_label}: ✅ {r.get('count', 0)}개")
 
-        print(f"\n  성공 {success_count} / 건너뜀 {skip_count} / 실패 {error_count}")
+        print(f"\n  성공 {success_count} / 건너뜀 {skip_count} / 실패 {error_count} "
+              f"/ IP 교체 {rotations_used}회")
 
         # S3 업로드 명령 힌트
         if success_count > 0:
@@ -2048,6 +2135,7 @@ async def main():
 
         # 정상 완료 — keep_open이면 대기 (F12 Network 검증 등)
         await shutdown(ctx, args, reason="정상 완료 — F12 Network에서 API host 확인 가능")
+        await relay.close()
 
 
 if __name__ == "__main__":

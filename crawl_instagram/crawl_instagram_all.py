@@ -13,7 +13,9 @@
     python crawl_instagram/crawl_instagram_all.py           # 세션 재사용, 전체 계정 게시물+릴스
     python crawl_instagram/crawl_instagram_all.py --account youra_ch0i --limit 10
     python crawl_instagram/crawl_instagram_all.py --batch-size 5 --batch-rest 300
-    python crawl_instagram/crawl_instagram_all.py --no-proxy
+    python crawl_instagram/crawl_instagram_all.py            # 전체 계정, 2026-01 이후 게시물+릴스
+    python crawl_instagram/crawl_instagram_all.py --since 2026-01-01
+    python crawl_instagram/crawl_instagram_all.py --account youra_ch0i --limit 50
 
 출력 (계정별 파일 2개씩):
     crawl_instagram/output/instagram_<account>_posts_YYYYMMDD.csv
@@ -34,14 +36,20 @@ import crawl_instagram_reels as ig_reels
 def main():
     ap = argparse.ArgumentParser(description="인스타그램 통합 크롤러 (게시물+릴스)")
     ap.add_argument("--account", help="단일 username (accounts_list 무시)")
-    ap.add_argument("--limit", type=int, default=10, help="계정당 게시물/릴스 각 수 (기본 10)")
+    ap.add_argument("--since", default=ig_post.DEFAULT_SINCE,
+                    help=f"이 날짜(YYYY-MM-DD) 이후 게시물/릴스만 수집 (기본 {ig_post.DEFAULT_SINCE})")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="계정당 게시물/릴스 각 최대 수 안전상한 (0=무제한, 날짜 기준)")
+    ap.add_argument("--max-pages", type=int, default=ig_post.DEFAULT_MAX_PAGES,
+                    help=f"계정당 페이지 상한 — 폭주 방지 (기본 {ig_post.DEFAULT_MAX_PAGES})")
     ap.add_argument("--login", action="store_true", help="강제 수동 로그인 (세션 갱신)")
     ap.add_argument("--no-proxy", action="store_true")
     ap.add_argument("--keep-ip", action="store_true",
                     help="프록시 IP 세션 유지 (기본은 매 실행 새 IP로 초기화)")
-    ap.add_argument("--delay", type=float, default=2.0, help="단계 간 딜레이(초)")
-    ap.add_argument("--batch-size", type=int, default=5,
-                    help="봇 감지 회피 — 이 계정 수마다 휴식 (기본 5)")
+    ap.add_argument("--delay", type=float, default=2.0,
+                    help="기본 딜레이(초). 실제 대기는 이 값~2배 사이 랜덤 지터")
+    ap.add_argument("--batch-size", type=int, default=2,
+                    help="봇 감지 회피 — 이 계정 수마다 휴식 (기본 2)")
     ap.add_argument("--batch-rest", type=int, default=300,
                     help="배치 사이 휴식 초 (기본 300=5분)")
     ap.add_argument("--skip-posts", action="store_true", help="게시물 생략(릴스만)")
@@ -81,10 +89,12 @@ def main():
 
     now = datetime.now()
     fetched_at = now.isoformat()
+    cutoff = ig_post.since_ts(args.since)
     total = len(accounts)
     batch_size = max(1, args.batch_size)
-    print(f"\n대상 계정 {total}개 — 계정마다 게시물+릴스, "
-          f"{batch_size}명마다 {args.batch_rest//60}분 휴식 (봇 감지 회피)")
+    print(f"\n대상 계정 {total}개 — 계정마다 게시물+릴스 ({args.since} 이후, "
+          f"limit={args.limit or '무제한'}), "
+          f"{batch_size}명마다 {args.batch_rest//60}분 휴식")
 
     post_outputs, reel_outputs = [], []
     for idx, username in enumerate(accounts):
@@ -108,33 +118,35 @@ def main():
 
             # 1) 게시물
             if not args.skip_posts:
-                items = ig_post.fetch_recent_posts(session, profile["id"], args.limit)
+                items = ig_post.fetch_posts_since(session, profile["id"], cutoff,
+                                                  args.limit, args.max_pages, delay=args.delay)
                 prows = [ig_post.extract_post_from_feed_item(it, profile, fetched_at)
                          for it in items]
                 if prows:
                     po = ig_post.save_csv(prows, now, username)
                     post_outputs.append((username, len(prows)))
-                    print(f"  [게시물] {len(prows)}개 → {os.path.basename(po)}")
+                    print(f"  [게시물] {len(prows)}개 ({args.since} 이후) → {os.path.basename(po)}")
                 else:
-                    print("  [게시물] 0개 (비공개/API 제한)")
-                time.sleep(args.delay)
+                    print(f"  [게시물] 0개 ({args.since} 이후 없음/비공개/API 제한)")
+                ig_post.sleep_jitter(args.delay)
 
             # 2) 릴스
             if not args.skip_reels:
-                reels = ig_reels.fetch_reels(session, profile["id"], args.limit, args.delay)
+                reels = ig_reels.fetch_reels_since(session, profile["id"], cutoff,
+                                                   args.limit, args.delay, args.max_pages)
                 rrows = [ig_reels.extract_reel(it, profile, fetched_at) for it in reels]
                 if rrows:
                     ro = ig_reels.save_csv(rrows, now, username)
                     reel_outputs.append((username, len(rrows)))
-                    print(f"  [릴스] {len(rrows)}개 → {os.path.basename(ro)}")
+                    print(f"  [릴스] {len(rrows)}개 ({args.since} 이후) → {os.path.basename(ro)}")
                 else:
-                    print("  [릴스] 0개 (릴스 없음/비공개/API 제한)")
+                    print(f"  [릴스] 0개 ({args.since} 이후 없음/비공개/API 제한)")
         except KeyboardInterrupt:
             print("\n[중단] Ctrl+C — 종료 (여기까지 계정별 저장 완료)")
             break
         except Exception as e:
             print(f"  [오류] {type(e).__name__}: {str(e)[:120]} — 이 계정 건너뜀")
-        time.sleep(args.delay)
+        ig_post.sleep_jitter(args.delay)
 
     print(f"\n[전체 완료] 게시물 {len(post_outputs)}계정 / 릴스 {len(reel_outputs)}계정")
     for u, n in post_outputs:
