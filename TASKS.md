@@ -64,3 +64,4 @@
 - [x] [샤오홍슈] grab_xhs·grab_search_test 검색 진입 타임아웃 20초 통일 — QR 로그인 직후 20초 대기 + 검색박스·[用户]탭·user카드·검색결과/프로필URL 탐지·클릭 판정 전부 20초(감지 시 즉시 통과), captcha 감지는 2초 유지 (2026-07-22)
 - [x] [샤오홍슈] 로컬 릴레이 프록시 도입 — 브라우저 재실행/QR 없이 Oxylabs IP 스왑. 홈진입 실패·검색박스 실패·[用户]탭 클릭 실패·安全验证 캡차 감지 시 IP 교체 후 실패한 계정부터 재시도 (2026-07-23)
 - [x] [샤오홍슈] grab_search_test(접속 테스트)에도 릴레이 IP 전환 적용 + oxylabs_relay 안정성 보강(종료 시 연결 task 정리로 'Task destroyed' 경고 제거, 상류 CONNECT 20/30초 타임아웃), 실동작으로 IP 교체 확인 (2026-07-23)
+- [x] [샤오홍슈] IP 자동 교체 기본 상한 상향 — 187계정 실운영용으로 --max-ip-rotations 8→300, --rotate-retries 2→3 (grab_xhs·grab_search_test) (2026-07-24)
