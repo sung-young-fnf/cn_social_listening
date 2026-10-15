@@ -1646,7 +1646,7 @@ def parse_args():
     p = argparse.ArgumentParser(
         description=(
             "XHS 전체 운영 크롤러 — xhs_config.py의 모든 creator를 자동 크롤링.\n"
-            "  지난주 자동: python runners/grab_xhs.py --reset-session --detail-count 10\n"
+            "  지난주 자동: python runners/grab_xhs.py --reset-session\n"
             "  특정 주차:   python runners/grab_xhs.py --reset-session --week 0420\n"
             "특정 uid 박는 검증/디버그용은 grab_xhs_refactor.py 사용."
         ),
@@ -1655,10 +1655,9 @@ def parse_args():
     p.add_argument("--reset-session", action="store_true", help="user_data_dir + cookie 리셋 (QR 재발급)")
     p.add_argument("--max-pages", type=int, default=3)
     p.add_argument("--detail-count", type=int, default=None,
-                   help="노트 상세 진입 개수 (comments/stars/shares/content 채우기). "
-                        "미지정 시 자동: 지난주 자동 모드면 0(목록만), "
-                        "특정 날짜 범위(--week/--date-start/end/--days/--all) 지정 시 -1(전체). "
-                        "명시값 우선. 검증 시 5 권장")
+                   help="노트 상세 진입 개수 (post_date/comments/stars/shares/content 채우기). "
+                        "미지정 시 -1(필터 통과 노트 전부). "
+                        "명시값 우선. 검증 시 5 권장 — 초과분 노트는 post_date 빈 값으로 적재됨")
     p.add_argument("--keep-open", action="store_true",
                    help="에러/완료 후에도 브라우저 안 닫음 (F12 Network 분석용). Ctrl+C 또는 Enter로 종료")
 
@@ -1762,15 +1761,13 @@ async def main():
         sys.exit(1)
     print(f"[date-filter] {date_label}")
 
-    # detail-count 자동 결정 — 특정 날짜 범위(백필)는 10개, 지난주 자동은 0
-    # 사용자가 명시적으로 박은 값은 그대로 사용
+    # detail-count 미지정 시 필터 통과 노트 전부(-1).
+    # post_date 는 detail 에서만 채워진다 (listener last_update_time 은 항상 빈 값) →
+    # 개수를 제한하면 초과분 노트가 게시일 빈 값으로 S3 에 적재된다.
+    # 사용자가 명시적으로 박은 값은 그대로 사용 (검증용)
     if args.detail_count is None:
-        explicit_range = bool(args.week or args.date_start or args.date_end
-                              or args.days or args.all)
-        args.detail_count = 10 if explicit_range else 0
-        mode = "10개 (백필)" if args.detail_count == 10 else "목록만(0)"
-        print(f"[detail ] 자동 결정: {mode} "
-              f"({'특정 날짜 범위' if explicit_range else '지난주 자동'})")
+        args.detail_count = -1
+        print("[detail ] 자동 결정: 전체 (필터 통과 노트 전부)")
     else:
         print(f"[detail ] 명시값: {args.detail_count}")
 

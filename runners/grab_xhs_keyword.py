@@ -296,30 +296,20 @@ async def collect_notes_by_keyword(page, keyword, max_scrolls=10):
         page.remove_listener("response", on_response)
         return [], {"error": msg}
 
-    # 첫 응답 대기
+    # 정렬 적용 후 — 정렬 전 응답(综合) 제거하고 정렬 후 응답(最新+一周内)만 받기
+    # navigate_via_keyword가 끝난 시점엔 captured_notes에 정렬 전/후 응답이 섞임 →
+    # 정렬 적용 직후의 새 listener 응답만 사용해야 진짜 최신 노트 받음
+    captured_notes.clear()
+    seen_ids.clear()
+    captured_meta["responses"] = 0
+    captured_meta["success"] = 0
+    captured_meta["has_more"] = False
+    print(f"  · 정렬 후 listener 재시작 (이전 응답 제거)")
+
+    # 정렬 적용 응답 대기 — lazy 스크롤 안 함
+    # 스크롤하면 정렬 전 응답이 섞이거나 panel 닫힘 등 부수효과. 첫 화면 응답이 진짜 최신순.
     await asyncio.sleep(4)
 
-    # 스크롤 lazy-load — has_more 신호 활용
-    print(f"  · 스크롤 lazy-load (최대 {max_scrolls}회)")
-    last_count = 0
-    stagnant = 0
-    for i in range(max_scrolls):
-        try:
-            await page.evaluate("window.scrollBy(0, 1500)")
-            await asyncio.sleep(2)
-        except Exception:
-            break
-        # 변동 없으면 has_more 검증 + 조기 종료
-        if len(captured_notes) == last_count:
-            stagnant += 1
-            if stagnant >= 2 and not captured_meta["has_more"]:
-                print(f"    · 스크롤 {i+1}회 후 정체 + has_more=False → 조기 종료")
-                break
-        else:
-            stagnant = 0
-            last_count = len(captured_notes)
-
-    await asyncio.sleep(2)
     page.remove_listener("response", on_response)
     print(f"  · listener 캡처: 응답 {captured_meta['responses']}건, "
           f"success {captured_meta['success']}건, 노트 {len(captured_notes)}개")
@@ -337,6 +327,9 @@ def make_keyword_output_dir(week=None):
 def write_keyword_output(base_dir, keyword, notes):
     """red-keyword-YYMMDD/<keyword>/notes.json 저장.
 
+    detail 받은 노트만 저장 — desc/post_date/ip_location 등 풍부 데이터 있는 노트만.
+    detail 미진입 노트는 작성일 모름 → DB 분석에 의미 없어서 제외.
+
     파일 시스템 안전 위해 keyword를 dir-safe로 변환 (특수문자 제거).
     """
     safe_keyword = re.sub(r'[\\/:*?"<>|]', "_", keyword).strip() or "unknown"
@@ -347,6 +340,9 @@ def write_keyword_output(base_dir, keyword, notes):
     for n in notes:
         note_id = n.get("noteId", "")
         if not note_id:
+            continue
+        # detail 진입 안 한 노트 skip — image_urls 또는 post_date 둘 다 없으면 detail 미진입
+        if not (n.get("image_urls") or n.get("post_date")):
             continue
         xsec = n.get("xsec_token", "")
         if xsec:
@@ -396,7 +392,7 @@ def load_xhs_all_keywords():
     """
     config_path = os.path.abspath(os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "..", "crawlers", "mediacrawler-config", "xhs_config.py"
+        "..", "data", "xhs_config.py"
     ))
     if not os.path.isfile(config_path):
         print(f"[FAIL] xhs_config.py 못 찾음 — {config_path}")
@@ -420,6 +416,38 @@ def load_xhs_all_keywords():
     return merged
 
 
+def load_keywords_from_csv(csv_path, top_n=None):
+    """tools/extract_hashtags.py 가 만든 해시태그 CSV에서 키워드 리스트 로드.
+
+    CSV 스키마: hashtag,count,influencer_count (count 내림차순 정렬돼 있음, utf-8-sig).
+    `hashtag` 칼럼만 읽어 순서 보존 + 중복 제거. top_n 지정 시 상위 N개만.
+    """
+    import csv as _csv
+
+    path = csv_path if os.path.isabs(csv_path) else os.path.abspath(csv_path)
+    if not os.path.isfile(path):
+        print(f"[FAIL] 키워드 CSV 못 찾음 — {path}")
+        return []
+
+    keywords = []
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = _csv.DictReader(f)
+        if not reader.fieldnames or "hashtag" not in reader.fieldnames:
+            print(f"[FAIL] CSV에 'hashtag' 칼럼 없음 — {reader.fieldnames}")
+            return []
+        for row in reader:
+            tag = (row.get("hashtag") or "").strip()
+            if tag:
+                keywords.append(tag)
+
+    keywords = list(dict.fromkeys(keywords))  # dedup + 순서 보존(=count 내림차순)
+    if top_n is not None and top_n > 0:
+        keywords = keywords[:top_n]
+    print(f"[keyword-list] CSV {os.path.basename(path)} 에서 {len(keywords)}개 로드"
+          f"{f' (상위 {top_n})' if top_n else ''}")
+    return keywords
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description=(
@@ -432,11 +460,16 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("keywords", nargs="?", default=None,
-                   help="검색 키워드 (콤마로 여러 개). 미지정 시 xhs_config.py 전체 자동")
+                   help="검색 키워드 (콤마로 여러 개). 미지정 시 --keywords-csv 또는 xhs_config.py 전체 자동")
+    p.add_argument("--keywords-csv", default=None,
+                   help="해시태그 CSV 경로 (tools/extract_hashtags.py 산출물). "
+                        "지정 시 xhs_config.py 대신 이 CSV의 hashtag 칼럼을 키워드로 사용")
+    p.add_argument("--top-n", type=int, default=None,
+                   help="--keywords-csv 사용 시 상위 N개만 (CSV는 중복수 내림차순). 미지정 시 전체")
     p.add_argument("--reset-session", action="store_true")
-    p.add_argument("--detail-count", type=int, default=10,
-                   help="노트당 detail 진입 개수 (0=skip, -1=전체, 기본 10). "
-                        "-1은 키워드당 캡처된 모든 노트(보통 100~300개) detail 진입 — 운영 시간 매우 김")
+    p.add_argument("--detail-count", type=int, default=20,
+                   help="노트당 detail 진입 개수 (0=skip, -1=전체, 기본 20). "
+                        "-1은 캡처된 모든 노트 detail 진입 — 운영 시간 매우 김")
     p.add_argument("--keep-open", action="store_true")
     p.add_argument("--no-images", action="store_true")
     p.add_argument("--image-concurrency", type=int, default=5)
@@ -455,10 +488,12 @@ async def main():
     args = parse_args()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 키워드 결정: 인자 명시 > xhs_config.py 자동 로드
+    # 키워드 결정 우선순위: 인자 명시 > --keywords-csv > xhs_config.py 자동 로드
     if args.keywords:
         keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
         print(f"[keyword-list] 명시값 {len(keywords)}개: {keywords}")
+    elif args.keywords_csv:
+        keywords = load_keywords_from_csv(args.keywords_csv, top_n=args.top_n)
     else:
         keywords = load_xhs_all_keywords()
 
