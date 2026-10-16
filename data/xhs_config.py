@@ -125,7 +125,7 @@ XHS_CREATOR_ID_LIST = [
     "https://www.xiaohongshu.com/user/profile/646c717400000000100255ad",  # 经典一只白
     "https://www.xiaohongshu.com/user/profile/5ef19e5400000000010056cc",  # 是小龙吖
     "https://www.xiaohongshu.com/user/profile/58aea2a750c4b45dc979e9ad",  # 球球你了
-    "https://www.xiaohongshu.com/user/profile/5619d5f93f0f3c04bc4c4b80",  # 全智鹅
+    "https://www.xiaohongshu.com/user/profile/56ca6a6184edcd7e46b78e4a",  # 全智鹅
     "https://www.xiaohongshu.com/user/profile/5c94ce0e0000000016015bc6",  # 双下巴真可爱
     "https://www.xiaohongshu.com/user/profile/5738962982ec397c28ac35a7",  # 敢敢子
     "https://www.xiaohongshu.com/user/profile/582e9987a9b2ed28b78bf5be",  # Dee
@@ -226,6 +226,16 @@ XHS_CREATOR_ID_LIST = [
     "https://www.xiaohongshu.com/user/profile/6081764c0000000001001a23",  # 秋林 Fashion
     "https://www.xiaohongshu.com/user/profile/61861c2700000000210277cb",  # Matching outfits
     "https://www.xiaohongshu.com/user/profile/5aee79cce8ac2b3edf849f8a",  # 明星同款
+    # === influencer (8) ===
+    # #15 Phil 요청 추가 계정 (2026-10-16 추가) — load_mst_profile 섹션 규칙상 influencer = 인플루언서
+    "https://www.xiaohongshu.com/user/profile/5daf230d0000000001009946",  # 过氧化锶
+    "https://www.xiaohongshu.com/user/profile/63ab97e6000000002601315d",  # yepii777
+    "https://www.xiaohongshu.com/user/profile/57b72aed5e87e72e5cfae1e2",  # reallyeon_
+    "https://www.xiaohongshu.com/user/profile/5b42049911be1059d08d2502",  # Nice2CU_772
+    "https://www.xiaohongshu.com/user/profile/5a8ae3dbe8ac2b562be2a19b",  # Babyblue
+    "https://www.xiaohongshu.com/user/profile/5b24a1a3e8ac2b07af116934",  # 流星牛角
+    "https://www.xiaohongshu.com/user/profile/5984a2fb5e87e72311ad56c8",  # RosySeas
+    "https://www.xiaohongshu.com/user/profile/63aecbf70000000026006dbe",  # 安的后半生
 ]
 
 
